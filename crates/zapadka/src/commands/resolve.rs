@@ -214,11 +214,10 @@ fn nothing_to_resolve(
     );
 
     if unresolved.is_empty() {
-        // The common confusion: a failed deploy that the server refused is not
-        // an unresolved one, and there is nothing here to fix.
         return error.with_hint(
-            "nothing is blocked, so there is nothing to resolve. A deploy that failed with an \
-             error from the server needs no resolution: the statement did not take effect.",
+            "nothing is blocked on this target, so there is nothing to resolve. Check that this \
+             is the target the interrupted deploy ran against -- `zapadka status` lists any \
+             blocked migration.",
         );
     }
 

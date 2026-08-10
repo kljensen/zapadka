@@ -1038,6 +1038,14 @@ struct Event<'a> {
 /// different facts, and reporting only the first would leave them to discover
 /// the second from whatever they ran next.
 fn blocked_by(failure: Error, migration: &Migration) -> Error {
+    // PostgreSQL's own HINT is often the most actionable line in the whole
+    // failure, and `script_failed` has already carried it through. Appending
+    // rather than replacing keeps both: what to fix, and what state the target
+    // is in while you fix it.
+    let server_hint = failure
+        .hint()
+        .map(|hint| format!("{hint}\n\n"))
+        .unwrap_or_default();
     let hint = format!(
         "the target is now blocked. A nontransactional statement can fail after doing part of its \
          work -- a failed CREATE INDEX CONCURRENTLY leaves an invalid index -- so Zapadka will not \
@@ -1045,7 +1053,7 @@ fn blocked_by(failure: Error, migration: &Migration) -> Error {
          behind, then run `zapadka resolve {} --not-applied`.",
         zapadka_core::migration::short_id(migration.id)
     );
-    failure.with_hint(hint)
+    failure.with_hint(format!("{server_hint}{hint}"))
 }
 
 pub(crate) async fn apply_timeouts(
