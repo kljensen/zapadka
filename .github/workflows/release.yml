@@ -82,9 +82,6 @@ jobs:
       # An SBOM is how a downstream user answers "does this binary contain the
       # thing that was just disclosed" without rebuilding it. Generated from the
       # locked dependency graph, so it describes what was actually compiled.
-      # An SBOM is how a downstream user answers "does this binary contain the
-      # thing that was just disclosed" without rebuilding it. Generated from the
-      # locked dependency graph, so it describes what was actually compiled.
       - name: Generate an SBOM
         run: |
           cargo install cargo-cyclonedx --locked
