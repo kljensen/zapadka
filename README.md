@@ -5,9 +5,9 @@ A static PostgreSQL migration and database-test tool, inspired by Sqitch and pgT
 One binary. No Perl, no `psql`, no libpq, no OpenSSL, no PostgreSQL client
 installation, and no separately installed test framework.
 
-> **Status: pre-alpha.** The transactional slice works and is tested against
-> PostgreSQL 18. `revert`, `baseline`, nontransactional migrations, and
-> `zapadka test` are not implemented yet. See [Limitations](#limitations).
+> **Status: pre-alpha.** Every command below works and is tested against
+> PostgreSQL 18. Nontransactional migrations are the significant gap. See
+> [Limitations](#limitations).
 
 ## What it is
 
@@ -23,6 +23,9 @@ zapadka lint
 zapadka deploy --target production
 zapadka status --target production
 ```
+
+The full command set is `init`, `new`, `lint`, `status`, `deploy`, `verify`,
+`revert`, `baseline`, and `test`.
 
 ## What makes it different
 
@@ -43,9 +46,21 @@ is a new migration, which leaves both facts in the history.
 
 **Verification is separate from testing.** `verify.sql` is plain,
 production-safe SQL that runs after its migration commits, in a fresh
-transaction that is always rolled back. It observes committed state and cannot
-leave anything behind. Database tests are a separate command against an explicit
-test target.
+**read-only** transaction that is always rolled back. It observes committed
+state and cannot leave anything behind. Database tests are a separate command
+against an explicit test target.
+
+Read-only as well as rolled back, because rollback alone is not enough:
+PostgreSQL does not roll back `nextval()`, so a verification script that touched
+a sequence would advance it permanently. The cost is that a read-only
+transaction refuses every `CREATE`, including `CREATE TEMP TABLE` — build an
+expected set with a CTE or a `VALUES` list instead:
+
+```sql
+WITH expected(id) AS (VALUES (1::bigint), (2::bigint))
+SELECT 1 / (CASE WHEN (SELECT count(*) FROM app.orders)
+                 = (SELECT count(*) FROM expected) THEN 1 ELSE 0 END);
+```
 
 **Nothing is reverted automatically.** If verification fails after a migration
 committed, Zapadka records that and stops. It does not run unproven revert SQL
@@ -154,18 +169,20 @@ but Zapadka says so in the report unless the target asked for it with
 - PostgreSQL 18 or newer. Zapadka analyses migrations with the PostgreSQL 18
   grammar, so it cannot make truthful safety decisions about an older server and
   refuses to try.
-- Linux x86_64 for released binaries. Building from source works anywhere Rust
-  and a C compiler do.
+- Linux x86_64 or aarch64 for released binaries. Building from source works
+  anywhere Rust and a C compiler do.
 
 ## Limitations
 
-This is a pre-alpha transactional slice. Not yet implemented:
+**`transaction = "forbidden"` is not implemented.** Nontransactional migrations
+— `CREATE INDEX CONCURRENTLY` and friends — are rejected at validation time with
+an explanation. The execution mode itself is straightforward; what it needs is
+the audited recovery path for an interrupted run, because a nontransactional
+statement that was cut off mid-flight leaves a state Zapadka cannot infer.
+Shipping the mode without that recovery would be worse than not shipping it.
 
-- `revert`, `baseline`, and `test`
-- `transaction = "forbidden"` (nontransactional migrations such as
-  `CREATE INDEX CONCURRENTLY`), which is currently rejected at validation time
-  with an explanation
-- aarch64 binaries and SBOM
+**No release has been published yet.** Binaries are built and tested for both
+architectures on every change, but no tag has been cut.
 
 Deliberately out of scope for v1: Sqitch or pgTAP CLI/metadata compatibility,
 non-PostgreSQL databases, automatic rollback, declarative schema diffing,

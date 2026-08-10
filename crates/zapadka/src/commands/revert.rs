@@ -34,33 +34,78 @@ pub async fn run(
     let opened = target::open(config, &args.target, session).await?;
     target::require_initialized(&opened.state, &opened.name)?;
 
-    // History integrity first: reverting a migration whose source has been
-    // edited would run a revert script that does not match what was deployed.
-    history::plan(graph, &opened.state.applied)?;
-
-    let migration = select(graph, &opened.state, &args.migration)?;
-    check_revertible(graph, &opened.state, migration)?;
-
     let wait = args
         .wait
         .unwrap_or(config.config.policy.advisory_lock_timeout);
+    let (schema, name, facts, timeouts) = (
+        opened.schema.clone(),
+        opened.name.clone(),
+        opened.facts,
+        opened.timeouts,
+    );
     let client = opened.connection.client;
     let held = lock::acquire(&client, config.config.project.id, wait).await?;
 
-    let mut runner = Runner::new(
-        client,
-        opened.schema.clone(),
-        session.run_id,
-        opened.facts,
-        crate::session::VERSION.to_owned(),
-        opened.timeouts,
-    );
+    // Every check below runs against state read *after* the lock was taken.
+    // Checking first and locking second would let another run apply a migration
+    // that depends on this one in between, and the leaf check would pass for a
+    // migration that is no longer a leaf.
+    let (client, outcome) = revert_under_lock(
+        config, graph, args, session, client, &schema, &name, facts, timeouts,
+    )
+    .await;
 
-    let outcome = revert_one(migration, session, &mut runner).await;
-
-    let client = runner.into_client();
     let released = held.release(&client).await;
     outcome.and(released)
+}
+
+/// The body of a revert, with the lock held.
+///
+/// Returns the connection alongside the outcome so the caller can release the
+/// lock whatever happened.
+#[allow(clippy::too_many_arguments)]
+async fn revert_under_lock(
+    config: &LoadedConfig,
+    graph: &Graph,
+    args: &RevertArgs,
+    session: &mut Session,
+    client: zapadka_pg::Client,
+    schema: &str,
+    name: &str,
+    facts: zapadka_pg::ServerFacts,
+    timeouts: zapadka_pg::Timeouts,
+) -> (zapadka_pg::Client, Result<()>) {
+    let state = match target::refresh_state(&client, config, schema).await {
+        Ok(state) => state,
+        Err(error) => return (client, Err(error)),
+    };
+    if let Err(error) = target::require_initialized(&state, name) {
+        return (client, Err(error));
+    }
+
+    // History integrity first: reverting a migration whose source has been
+    // edited would run a revert script that does not match what was deployed.
+    if let Err(error) = history::plan(graph, &state.applied) {
+        return (client, Err(error));
+    }
+
+    let migration = match select(graph, &state, &args.migration)
+        .and_then(|migration| check_revertible(graph, &state, migration).map(|()| migration))
+    {
+        Ok(migration) => migration,
+        Err(error) => return (client, Err(error)),
+    };
+
+    let mut runner = Runner::new(
+        client,
+        schema.to_owned(),
+        session.run_id,
+        facts,
+        crate::session::VERSION.to_owned(),
+        timeouts,
+    );
+    let outcome = revert_one(migration, session, &mut runner).await;
+    (runner.into_client(), outcome)
 }
 
 /// Reverts one migration and records the result.

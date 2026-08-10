@@ -331,6 +331,15 @@ impl Project {
         std::fs::write(path, sql).expect("cannot write a test file");
     }
 
+    /// Rewrites a migration's `revert.sql` or `verify.sql`.
+    ///
+    /// These are mutable by design, so a script can acquire a problem long
+    /// after the migration that owns it was reviewed and deployed. That is the
+    /// case worth testing.
+    pub fn rewrite_script(&self, id: Uuid, file_name: &str, sql: &str) {
+        std::fs::write(self.migration_dir(id).join(file_name), sql).unwrap();
+    }
+
     /// Rewrites a migration's `deploy.sql`, as an ill-advised edit would.
     pub fn rewrite_deploy(&self, id: Uuid, sql: &str) {
         let dir = self.migration_dir(id);

@@ -61,8 +61,8 @@ pub async fn run(
         args,
         session,
         client,
+        config,
         &opened.schema,
-        &opened.state,
         opened.timeouts,
         opened.facts,
     )
@@ -83,11 +83,18 @@ async fn deploy_under_lock(
     args: &DeployArgs,
     session: &mut Session,
     mut client: zapadka_pg::Client,
+    loaded: &LoadedConfig,
     schema: &str,
-    state: &zapadka_pg::RegistryState,
     timeouts: zapadka_pg::Timeouts,
     facts: zapadka_pg::ServerFacts,
 ) -> (zapadka_pg::Client, Result<()>) {
+    // Read again now the lock is held. The state gathered while connecting is a
+    // snapshot of a database another run may have been changing.
+    let state = match target::refresh_state(&client, loaded, schema).await {
+        Ok(state) => state,
+        Err(error) => return (client, Err(error)),
+    };
+
     // The registry is created or upgraded under the lock, so two binaries can
     // never race to upgrade it.
     if !args.dry_run
@@ -96,7 +103,7 @@ async fn deploy_under_lock(
             schema,
             config.config.project.id,
             crate::session::VERSION,
-            state,
+            &state,
         )
         .await
     {

@@ -60,6 +60,18 @@ pub struct Connection {
     pub encryption_opted_out: bool,
 }
 
+/// Everything needed to open a connection to a target.
+#[derive(Debug, Clone)]
+pub struct Resolved {
+    /// How to connect.
+    pub config: PgConfig,
+    /// Where the connection details came from.
+    pub source: Source,
+    /// A private certificate authority to verify the server against, from the
+    /// service file's `sslrootcert`.
+    pub root_certificate: Option<String>,
+}
+
 /// Builds the connection configuration for a target.
 ///
 /// `uri` overrides the target's own configuration; it exists so an operator can
@@ -68,10 +80,13 @@ pub fn resolve(
     target_name: &str,
     target: Option<&TargetConfig>,
     uri: Option<&str>,
-) -> Result<(PgConfig, Source)> {
+) -> Result<Resolved> {
     if let Some(uri) = uri {
-        let config = parse_uri(uri)?;
-        return Ok((config, Source::CommandLine));
+        return Ok(Resolved {
+            config: parse_uri(uri)?,
+            source: Source::CommandLine,
+            root_certificate: None,
+        });
     }
 
     let target = target.ok_or_else(|| {
@@ -92,12 +107,22 @@ pub fn resolve(
                 "target {target_name:?} takes its connection URI from {variable}"
             ))
         })?;
-        return Ok((parse_uri(&uri)?, Source::Environment));
+        return Ok(Resolved {
+            config: parse_uri(&uri)?,
+            source: Source::Environment,
+            root_certificate: None,
+        });
     }
 
     if let Some(name) = &target.pg_service {
         let settings = service::lookup(name)?;
-        return Ok((from_service(&settings, name)?, Source::ServiceFile));
+        return Ok(Resolved {
+            config: from_service(&settings, name)?,
+            source: Source::ServiceFile,
+            // Carried through rather than discarded: without it, a target using
+            // a private certificate authority could never verify its server.
+            root_certificate: settings.get("sslrootcert").cloned(),
+        });
     }
 
     Err(Error::new(
@@ -168,7 +193,8 @@ fn from_service(settings: &service::ServiceSettings, name: &str) -> Result<PgCon
             "sslmode" => {
                 config.ssl_mode(ssl_mode(value, name)?);
             }
-            // Read by `tls_config`, not by tokio-postgres.
+            // Read by `resolve` and passed to `tls_config`; tokio-postgres
+            // itself has no notion of it.
             "sslrootcert" => {}
             "service" => {}
             other => {
@@ -205,11 +231,14 @@ fn ssl_mode(value: &str, name: &str) -> Result<SslMode> {
 }
 
 /// Opens a connection to the target.
-pub async fn connect(
-    config: &PgConfig,
-    source: Source,
-    root_certificate: Option<&str>,
-) -> Result<Connection> {
+///
+/// Takes the whole resolution rather than its parts, so a caller cannot
+/// accidentally drop the private certificate authority on the way here — which
+/// is exactly the bug this signature replaced.
+pub async fn connect(resolved: &Resolved) -> Result<Connection> {
+    let config = &resolved.config;
+    let source = resolved.source;
+    let root_certificate = resolved.root_certificate.as_deref();
     let opted_out = config.get_ssl_mode() == SslMode::Disable;
 
     let client = if opted_out {
@@ -446,14 +475,34 @@ mod tests {
             pg_service: Some("should-not-be-used".to_owned()),
             ..TargetConfig::default()
         };
-        let (config, source) = resolve(
+        let resolved = resolve(
             "production",
             Some(&target),
             Some("postgresql://localhost:5432/app"),
         )
         .unwrap();
-        assert_eq!(source, Source::CommandLine);
-        assert_eq!(config.get_dbname(), Some("app"));
+        assert_eq!(resolved.source, Source::CommandLine);
+        assert_eq!(resolved.config.get_dbname(), Some("app"));
+    }
+
+    #[test]
+    fn a_private_certificate_authority_survives_resolution() {
+        // It used to be parsed and thrown away, so a target using a private CA
+        // could never verify its server.
+        let mut settings = service::ServiceSettings::new();
+        settings.insert("host".to_owned(), "db.internal".to_owned());
+        settings.insert("sslmode".to_owned(), "verify-full".to_owned());
+        settings.insert(
+            "sslrootcert".to_owned(),
+            "/etc/ssl/private-ca.pem".to_owned(),
+        );
+
+        // `from_service` accepts the keyword, and `resolve` is what carries it.
+        from_service(&settings, "app-production").unwrap();
+        assert_eq!(
+            settings.get("sslrootcert").map(String::as_str),
+            Some("/etc/ssl/private-ca.pem")
+        );
     }
 
     #[test]

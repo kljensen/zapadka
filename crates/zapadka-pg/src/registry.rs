@@ -374,8 +374,14 @@ pub async fn upgrade(
 /// Refuses to act on a database that belongs to a different project.
 ///
 /// Two projects sharing one registry would interleave two unrelated histories,
-/// and neither project's `status` would mean anything afterwards.
-fn check_project(state: &RegistryState, project_id: Uuid) -> Result<()> {
+/// and neither project's `status` would mean anything afterwards. Worse, a
+/// `revert` would run one project's revert script against another project's
+/// schema while holding a lock the other project does not use.
+///
+/// Called from every command that opens a target, not only from the ones that
+/// write, because reading a foreign registry produces a confidently wrong
+/// answer rather than an obviously wrong one.
+pub fn check_project(state: &RegistryState, project_id: Uuid) -> Result<()> {
     match state.project_id {
         Some(existing) if existing != project_id => Err(Error::new(
             ErrorCode::RegistryProjectMismatch,

@@ -25,7 +25,7 @@ use zapadka_parser::{
 };
 
 use crate::config::Policy;
-use crate::error::{Error, ErrorCode};
+use crate::error::{Error, ErrorCode, Result};
 use crate::manifest::Transaction;
 use crate::migration::{Migration, Script};
 use crate::report::{Diagnostic, Location, ScriptRole, Severity};
@@ -110,6 +110,43 @@ impl Findings {
             .filter(|diagnostic| diagnostic.severity == Severity::Warning)
             .count()
     }
+}
+
+/// Rejects a script that would take the transaction boundary away from the
+/// runner.
+///
+/// `lint` and `deploy` already check this, but they check the project as a
+/// whole before connecting. Standalone `verify`, `revert`, and `test` execute a
+/// script without going through that path, and `verify.sql`, `revert.sql`, and
+/// test files are all *mutable* — one can acquire a `COMMIT` after the migration
+/// that owns it was deployed and reviewed.
+///
+/// So this is called immediately before any script is executed, whatever asked
+/// for it. It is the guarantee ADR-0002 actually rests on; everything earlier is
+/// there to fail sooner and explain better.
+pub fn ensure_runner_owns_transaction(sql: &str, path: &str) -> Result<()> {
+    let parsed = zapadka_parser::parse(sql).map_err(|error| {
+        Error::new(
+            ErrorCode::ScriptParseError,
+            format!("{path}: {}", error.message),
+        )
+        .at(Location::at(path, error.line, error.column))
+        .with_hint("PostgreSQL could not parse this script, so Zapadka will not send it")
+    })?;
+
+    let Some(statement) = parsed.transaction_control().next() else {
+        return Ok(());
+    };
+    let StatementKind::TransactionControl(operation) = statement.kind else {
+        return Ok(());
+    };
+
+    Err(Error::new(
+        ErrorCode::ScriptTransactionControl,
+        format!("{path} uses {} at the top level", operation.keyword()),
+    )
+    .at(Location::at(path, statement.line, 1))
+    .with_hint(transaction_control_hint(operation)))
 }
 
 /// Lints every migration in `migrations`.

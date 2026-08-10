@@ -159,24 +159,18 @@ fn verification_runs_after_commit_and_always_rolls_back() {
     project.migration_with(
         "create-orders",
         &[],
-        "CREATE TABLE public.orders (id bigint PRIMARY KEY);",
+        "CREATE TABLE public.orders (id bigint PRIMARY KEY);
+         INSERT INTO public.orders VALUES (1);",
         None,
-        // Verification observes the committed table, and its own write is
-        // discarded whatever the outcome.
-        Some(
-            "CREATE TABLE public.verification_side_effect (i int);\n\
-             SELECT 1 FROM public.orders;",
-        ),
+        // Verification observes the committed table and the row the migration
+        // inserted, which it could not see if it ran before the commit.
+        Some("SELECT 1 / (SELECT count(*)::int FROM public.orders);"),
     );
 
     let report = project.report(&["deploy", "--uri", &db.uri()]);
     report.assert_success();
 
     assert!(db.has_relation("public.orders"), "the migration committed");
-    assert!(
-        !db.has_relation("public.verification_side_effect"),
-        "verification must not be able to leave anything behind"
-    );
     assert_eq!(
         db.scalar(
             "SELECT count(*) FROM zapadka.events WHERE action = 'verify' AND outcome = 'succeeded'"
@@ -939,4 +933,251 @@ fn a_selector_matching_no_test_file_is_an_error() {
     project
         .report(&["test", "--uri", &db.uri(), "does-not-exist.sql"])
         .assert_failed("selector.matched_nothing", 3);
+}
+
+// --- Regressions for issues a code review found -------------------------------
+//
+// Each of these passed review as "obviously correct" and was not. They are kept
+// as integration tests rather than unit tests because every one of them is
+// about what the database ends up containing.
+
+#[test]
+fn no_command_will_act_on_another_projects_registry() {
+    let db = database();
+    let owner = project();
+    owner.migration("first", &[], "CREATE TABLE public.a (i int);");
+    owner
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // A different project — different project.id — pointed at the same database.
+    let intruder = project();
+    intruder.migration_with(
+        "other",
+        &[],
+        "CREATE TABLE public.b (i int);",
+        Some("DROP TABLE public.b;"),
+        None,
+    );
+    // `test` returns early when a project has no test files, so it needs one
+    // before it reaches the point where it would open the target.
+    intruder.test_file("any.sql", "SELECT plan(0); SELECT finish();");
+
+    // Every command that opens a target must refuse, not just the ones that
+    // upgrade the registry. `revert` in particular would otherwise run one
+    // project's revert script against another project's schema.
+    let uri = db.uri();
+    for command in [
+        vec!["status"],
+        vec!["verify"],
+        vec!["deploy"],
+        vec!["test"],
+        vec!["revert", "other"],
+        vec!["baseline", "--to", "other", "--acknowledge-existing-schema"],
+    ] {
+        let mut args = command.clone();
+        args.extend(["--uri", uri.as_str()]);
+        let report = intruder.report(&args);
+        assert_eq!(
+            report.error_code(),
+            "registry.project_mismatch",
+            "`{}` acted on another project's registry",
+            command.join(" ")
+        );
+    }
+}
+
+#[test]
+fn a_verify_script_cannot_commit_its_way_out_of_the_rollback() {
+    let db = database();
+    let project = project();
+    let id = project.migration_with(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint PRIMARY KEY);",
+        None,
+        Some("SELECT 1 FROM public.orders;"),
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // `verify.sql` is mutable, so it can acquire a COMMIT long after the
+    // migration that owns it was reviewed and deployed. Everything after that
+    // commit would run outside the transaction and survive the rollback.
+    project.rewrite_script(
+        id,
+        "verify.sql",
+        "COMMIT;\nCREATE TABLE public.escaped (i int);",
+    );
+
+    let report = project.report(&["verify", "--uri", &db.uri()]);
+    report.assert_failed("script.transaction_control", exit::VALIDATION);
+    assert!(!db.has_relation("public.escaped"));
+}
+
+#[test]
+fn a_revert_script_cannot_commit_its_way_out_of_the_rollback() {
+    let db = database();
+    let project = project();
+    let id = project.migration_with(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint PRIMARY KEY);",
+        Some("DROP TABLE public.orders;"),
+        None,
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // Acquired after the deploy, as a mutable script can. Nothing validated it
+    // on the way in, so the runner is what has to catch it.
+    project.rewrite_script(
+        id,
+        "revert.sql",
+        "COMMIT;\nCREATE TABLE public.escaped (i int);",
+    );
+
+    let report = project.report(&["revert", "--uri", &db.uri(), "create-orders"]);
+    report.assert_failed("script.transaction_control", exit::VALIDATION);
+    assert!(!db.has_relation("public.escaped"));
+    // The migration is untouched, because nothing ran.
+    assert_eq!(
+        db.scalar("SELECT count(*) FROM zapadka.applied_migrations"),
+        "1"
+    );
+}
+
+#[test]
+fn a_test_file_cannot_commit_its_way_out_of_the_rollback() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // The whole file is sent as one simple query, so statements after a COMMIT
+    // would run outside the transaction and the later rollback would not undo
+    // them — silently breaking the isolation the whole suite depends on.
+    project.test_file(
+        "escapes.sql",
+        "SELECT plan(1);
+         COMMIT;
+         CREATE TABLE public.escaped (i int);
+         SELECT ok(true, 'still here');
+         SELECT finish();",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    assert_ne!(report.code(), 0, "a test file that commits must not pass");
+    assert!(!db.has_relation("public.escaped"));
+}
+
+#[test]
+fn verification_cannot_write_even_without_transaction_control() {
+    let db = database();
+    let project = project();
+    project.migration_with(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint PRIMARY KEY);",
+        None,
+        // No COMMIT, so the guard does not fire. Rollback would undo this, but
+        // the read-only transaction refuses it at the point it is attempted,
+        // which is the difference between a claim and an enforced property.
+        Some("INSERT INTO public.orders VALUES (1);"),
+    );
+
+    let report = project.report(&["deploy", "--uri", &db.uri()]);
+    report.assert_failed("verify.failed", exit::EXECUTION);
+    // 25006: read_only_sql_transaction.
+    assert_eq!(report.sqlstate(), "25006");
+    assert_eq!(db.scalar("SELECT count(*) FROM public.orders"), "0");
+}
+
+#[test]
+fn verification_can_build_an_expected_set_without_writing() {
+    // A read-only transaction refuses every CREATE, including CREATE TEMP
+    // TABLE, so a verification script that wants a set to compare against
+    // builds it with a CTE or a VALUES list. This is the pattern to reach for,
+    // and it is why the restriction is liveable.
+    let db = database();
+    let project = project();
+    project.migration_with(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint PRIMARY KEY);
+         INSERT INTO public.orders VALUES (1), (2);",
+        None,
+        Some(
+            "WITH expected(id) AS (VALUES (1::bigint), (2::bigint))
+             SELECT 1 / (CASE WHEN (SELECT count(*) FROM public.orders)
+                              = (SELECT count(*) FROM expected) THEN 1 ELSE 0 END);",
+        ),
+    );
+
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+    assert_eq!(db.scalar("SELECT count(*) FROM public.orders"), "2");
+}
+
+#[test]
+fn verification_cannot_advance_a_sequence() {
+    // Rollback does not undo `nextval()` -- a sequence advanced inside a
+    // rolled-back transaction stays advanced. Rollback alone therefore cannot
+    // deliver "verification leaves nothing behind"; the read-only transaction
+    // is what makes it true, by refusing the call.
+    let db = database();
+    let project = project();
+    project.migration_with(
+        "create-counter",
+        &[],
+        "CREATE SEQUENCE public.counter;",
+        None,
+        Some("SELECT nextval('public.counter');"),
+    );
+
+    let report = project.report(&["deploy", "--uri", &db.uri()]);
+    report.assert_failed("verify.failed", exit::EXECUTION);
+    assert_eq!(report.sqlstate(), "25006", "read_only_sql_transaction");
+    assert_eq!(
+        db.scalar("SELECT is_called FROM public.counter"),
+        "f",
+        "the sequence was never advanced"
+    );
+}
+
+#[test]
+fn a_successful_deploy_records_its_event_atomically() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // The applied row and its success event commit together, so history can
+    // never say a deploy failed while state says it is applied.
+    assert_eq!(
+        db.scalar(
+            "SELECT count(*) FROM zapadka.events \
+             WHERE action = 'deploy' AND outcome = 'succeeded'"
+        ),
+        "1"
+    );
+    assert_eq!(
+        db.scalar("SELECT count(*) FROM zapadka.applied_migrations"),
+        "1"
+    );
 }

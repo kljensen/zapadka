@@ -7,11 +7,16 @@
 //!
 //! # Why verification always rolls back
 //!
-//! `verify.sql` runs after its migration has committed, in a fresh transaction
-//! that is rolled back whatever happens. It therefore observes exactly the
-//! committed state a later reader would see, while being unable to leave
-//! anything behind. A verification that could write would be able to make
+//! `verify.sql` runs after its migration has committed, in a fresh **read-only**
+//! transaction that is rolled back whatever happens. It therefore observes
+//! exactly the committed state a later reader would see, while being unable to
+//! leave anything behind. A verification that could write would be able to make
 //! itself pass.
+//!
+//! Read-only as well as rolled back, because rollback alone is not enough:
+//! `nextval()` is not rolled back, and neither is anything a function does
+//! outside the database. The read-only transaction refuses those attempts
+//! rather than discovering afterwards that they persisted.
 //!
 //! # Why a failed verification does not revert
 //!
@@ -114,25 +119,17 @@ impl Runner {
         let started = Instant::now();
         let path = migration.deploy.relative_path.clone();
 
-        let result = self.deploy_inner(migration).await;
+        let result = self.deploy_inner(migration, started).await;
         // A script running for longer than 584 million years is not a case worth
         // modelling; saturating keeps the report honest without a panic.
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         match result {
             Ok(()) => {
-                self.record(Event {
-                    migration_id: Some(migration.id),
-                    action: "deploy",
-                    outcome: "succeeded",
-                    transaction_mode: Some(migration.manifest.transaction.as_str()),
-                    definition_sha256: Some(&migration.definition_sha256),
-                    script_role: Some("deploy"),
-                    script_sha256: Some(&migration.deploy.sha256),
-                    duration_ms: Some(duration_ms),
-                    error: None,
-                })
-                .await?;
+                // The success event was written inside the deploy transaction,
+                // so there is nothing to record here. Writing it separately
+                // would mean a failed insert could report an applied migration
+                // as failed and skip everything after it.
                 Ok(ScriptOutcome {
                     role: ScriptRole::Deploy,
                     path,
@@ -164,7 +161,12 @@ impl Runner {
     }
 
     /// The transactional body of a deploy.
-    async fn deploy_inner(&mut self, migration: &Migration) -> Result<()> {
+    ///
+    /// The user's SQL, the applied-migration row, and the success event all
+    /// commit together. Recording the event afterwards would open a window
+    /// where the database says a migration is applied and the history says the
+    /// deploy failed.
+    async fn deploy_inner(&mut self, migration: &Migration, started: Instant) -> Result<()> {
         let transaction = self
             .client
             .transaction()
@@ -172,6 +174,14 @@ impl Runner {
             .map_err(|error| registry_failed(error, "begin the migration transaction"))?;
 
         apply_timeouts(&transaction, self.timeouts).await?;
+
+        // Checked again here, immediately before execution. `deploy` validated
+        // the whole project before connecting; this is the check that actually
+        // guards the boundary, and it guards every path into the runner.
+        zapadka_core::lint::ensure_runner_owns_transaction(
+            &migration.deploy.sql,
+            &migration.deploy.relative_path,
+        )?;
 
         // The whole script goes to the server as one simple query. Zapadka does
         // not split it: any splitting rule it invented would eventually
@@ -184,6 +194,30 @@ impl Runner {
             })?;
 
         registry::record_applied(&transaction, &self.schema, self.run_id, migration).await?;
+
+        self.sequence += 1;
+        record_event(
+            &transaction,
+            &self.schema,
+            self.sequence,
+            self.run_id,
+            &self.facts,
+            &self.zapadka_version,
+            Event {
+                migration_id: Some(migration.id),
+                action: "deploy",
+                outcome: "succeeded",
+                transaction_mode: Some(migration.manifest.transaction.as_str()),
+                definition_sha256: Some(&migration.definition_sha256),
+                script_role: Some("deploy"),
+                script_sha256: Some(&migration.deploy.sha256),
+                // Measured before the commit, which is the only point at which
+                // it can be recorded inside the transaction it describes.
+                duration_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+                error: None,
+            },
+        )
+        .await?;
 
         transaction
             .commit()
@@ -241,11 +275,33 @@ impl Runner {
 
     /// Runs verification SQL in a transaction that is always rolled back.
     async fn verify_inner(&mut self, sql: &str, path: &str) -> Result<()> {
+        // `verify.sql` is mutable, so it can acquire a `COMMIT` long after the
+        // migration that owns it was reviewed. Without this, the statements
+        // after that commit would run outside the transaction and survive the
+        // rollback.
+        zapadka_core::lint::ensure_runner_owns_transaction(sql, path)?;
+
         let transaction = self
             .client
             .transaction()
             .await
             .map_err(|error| registry_failed(error, "begin the verification transaction"))?;
+
+        // Read-only, not merely rolled back. Rollback undoes table changes, but
+        // it does not undo everything PostgreSQL can do: a `nextval()` is not
+        // rolled back, and neither is anything a function writes outside the
+        // database. A read-only transaction refuses those at the point they are
+        // attempted, which turns "verification leaves nothing behind" from a
+        // claim about rollback into something the server enforces.
+        //
+        // Temporary tables remain writable, so a verification script can still
+        // build scratch data to check against.
+        transaction
+            .batch_execute("SET TRANSACTION READ ONLY")
+            .await
+            .map_err(|error| {
+                registry_failed(error, "make the verification transaction read-only")
+            })?;
 
         apply_timeouts(&transaction, self.timeouts).await?;
 
@@ -316,6 +372,13 @@ impl Runner {
 
     /// The transactional body of a revert.
     async fn revert_inner(&mut self, migration: &Migration, sql: &str, path: &str) -> Result<()> {
+        // `revert.sql` is mutable for the same reason `verify.sql` is: it can
+        // acquire a `COMMIT` long after the migration that owns it was reviewed
+        // and deployed. A commit here would end the runner's transaction, so
+        // the statements after it would run outside it and the applied-state
+        // row would not be removed with them.
+        zapadka_core::lint::ensure_runner_owns_transaction(sql, path)?;
+
         let transaction = self
             .client
             .transaction()
@@ -395,58 +458,24 @@ impl Runner {
         .await
     }
 
-    /// Appends one event.
+    /// Appends one event on the runner's own connection.
+    ///
+    /// Used for events that describe something already committed or rolled
+    /// back, where there is no transaction left to write into.
     async fn record(&mut self, event: Event<'_>) -> Result<()> {
         self.sequence += 1;
-        let quoted = quote_identifier(&self.schema);
-
-        let (sqlstate, message, detail) = match event.error {
-            Some(error) => (
-                error.sqlstate(),
-                Some(error.message.clone()),
-                error.detail(),
-            ),
-            None => (None, None, None),
-        };
-        // PostgreSQL has no unsigned integer type, so durations are stored
-        // signed; saturating keeps an implausible value from becoming negative.
-        let duration = event
-            .duration_ms
-            .map(|ms| i64::try_from(ms).unwrap_or(i64::MAX));
-
-        let params: [&(dyn ToSql + Sync); 17] = [
-            &self.run_id,
-            &self.sequence,
-            &event.migration_id,
-            &event.action,
-            &event.outcome,
-            &event.transaction_mode,
-            &event.definition_sha256,
-            &event.script_role,
-            &event.script_sha256,
-            &duration,
-            &sqlstate,
-            &message,
-            &detail,
-            &self.facts.session_user,
-            &self.facts.current_user,
-            &self.facts.server_version,
+        let (sql, values) = event_insert(&self.schema, &event);
+        let bound = bind(
+            self.run_id,
+            self.sequence,
+            &event,
+            &values,
+            &self.facts,
             &self.zapadka_version,
-        ];
+        );
 
         self.client
-            .execute(
-                &format!(
-                    "INSERT INTO {quoted}.events \
-                        (run_id, sequence, migration_id, action, outcome, transaction_mode, \
-                         definition_sha256, script_role, script_sha256, duration_ms, sqlstate, \
-                         message, detail, session_user_name, current_user_name, server_version, \
-                         zapadka_version) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, \
-                             $16, $17)"
-                ),
-                &params,
-            )
+            .execute(&sql, &bound.params())
             .await
             .map_err(|error| registry_failed(error, "record an event"))?;
         Ok(())
@@ -456,6 +485,126 @@ impl Runner {
     /// released on it.
     pub fn into_client(self) -> Client {
         self.client
+    }
+}
+
+/// Appends one event inside an open transaction.
+///
+/// This is what lets a deploy's success event commit atomically with the
+/// migration it describes.
+#[allow(clippy::too_many_arguments)]
+async fn record_event(
+    transaction: &PgTransaction<'_>,
+    schema: &str,
+    sequence: i32,
+    run_id: Uuid,
+    facts: &ServerFacts,
+    zapadka_version: &str,
+    event: Event<'_>,
+) -> Result<()> {
+    let (sql, values) = event_insert(schema, &event);
+    let bound = bind(run_id, sequence, &event, &values, facts, zapadka_version);
+
+    transaction
+        .execute(&sql, &bound.params())
+        .await
+        .map_err(|error| registry_failed(error, "record an event"))?;
+    Ok(())
+}
+
+/// The owned values an event insert needs, kept alive while the query runs.
+struct EventValues {
+    sqlstate: Option<String>,
+    message: Option<String>,
+    detail: Option<String>,
+    duration: Option<i64>,
+}
+
+/// The bound parameters of an event insert.
+struct BoundEvent<'a> {
+    run_id: Uuid,
+    sequence: i32,
+    event: &'a Event<'a>,
+    values: &'a EventValues,
+    facts: &'a ServerFacts,
+    zapadka_version: &'a str,
+}
+
+impl BoundEvent<'_> {
+    fn params(&self) -> [&(dyn ToSql + Sync); 17] {
+        [
+            &self.run_id,
+            &self.sequence,
+            &self.event.migration_id,
+            &self.event.action,
+            &self.event.outcome,
+            &self.event.transaction_mode,
+            &self.event.definition_sha256,
+            &self.event.script_role,
+            &self.event.script_sha256,
+            &self.values.duration,
+            &self.values.sqlstate,
+            &self.values.message,
+            &self.values.detail,
+            &self.facts.session_user,
+            &self.facts.current_user,
+            &self.facts.server_version,
+            &self.zapadka_version,
+        ]
+    }
+}
+
+/// Extracts the owned values an event insert needs.
+fn event_insert(schema: &str, event: &Event<'_>) -> (String, EventValues) {
+    let quoted = quote_identifier(schema);
+    let (sqlstate, message, detail) = match event.error {
+        Some(error) => (
+            error.sqlstate().map(str::to_owned),
+            Some(error.message.clone()),
+            error.detail().map(str::to_owned),
+        ),
+        None => (None, None, None),
+    };
+    let values = EventValues {
+        sqlstate,
+        message,
+        detail,
+        // PostgreSQL has no unsigned integer type, so durations are stored
+        // signed; saturating keeps an implausible value from becoming negative.
+        duration: event
+            .duration_ms
+            .map(|ms| i64::try_from(ms).unwrap_or(i64::MAX)),
+    };
+    let sql = format!(
+        "INSERT INTO {quoted}.events \
+            (run_id, sequence, migration_id, action, outcome, transaction_mode, \
+             definition_sha256, script_role, script_sha256, duration_ms, sqlstate, \
+             message, detail, session_user_name, current_user_name, server_version, \
+             zapadka_version) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)"
+    );
+    (sql, values)
+}
+
+/// Ties an event and its owned values together for binding.
+///
+/// The values have to outlive the query, and `ToSql` borrows them, so they are
+/// held in one place rather than as a dozen locals at each call site.
+fn bind<'a>(
+    run_id: Uuid,
+    sequence: i32,
+    event: &'a Event<'a>,
+    values: &'a EventValues,
+    facts: &'a ServerFacts,
+    zapadka_version: &'a str,
+) -> BoundEvent<'a> {
+    BoundEvent {
+        run_id,
+        sequence,
+        event,
+        values,
+        facts,
+        zapadka_version,
     }
 }
 

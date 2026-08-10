@@ -72,6 +72,12 @@ async fn run_inner(
     file: &TestFile,
     application_schemas: &[String],
 ) -> Result<TapDocument> {
+    // A test file that commits would escape the rollback: the whole file is
+    // sent as one simple query, so statements after a `COMMIT` run outside the
+    // transaction and survive it. That would silently break the isolation the
+    // whole suite depends on.
+    zapadka_core::lint::ensure_runner_owns_transaction(&file.sql, &file.relative_path)?;
+
     let transaction = client
         .transaction()
         .await

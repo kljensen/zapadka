@@ -32,13 +32,18 @@ pub async fn open(
     let name = select(config, args)?;
     let target = config.config.targets.get(&name);
 
-    let (pg_config, source) = zapadka_pg::resolve(&name, target, args.uri.as_deref())?;
-    let connection = zapadka_pg::connect(&pg_config, source, None).await?;
+    let resolved = zapadka_pg::resolve(&name, target, args.uri.as_deref())?;
+    let connection = zapadka_pg::connect(&resolved).await?;
 
     // Version first: every later check assumes a PostgreSQL 18 catalog.
     let facts = registry::server_facts(&connection.client).await?;
     let schema = config.config.project.registry_schema.clone();
     let state = registry::read(&connection.client, &schema).await?;
+
+    // Before any command uses this state. An initialized registry belonging to
+    // a different project would otherwise be read as if it were ours, and a
+    // mutating command would act on it.
+    registry::check_project(&state, config.config.project.id)?;
 
     if !connection.encrypted && !connection.encryption_opted_out {
         session.diagnose(Diagnostic {
@@ -120,6 +125,26 @@ fn select(config: &LoadedConfig, args: &TargetArgs) -> Result<String> {
                 .join(", ")
         ))),
     }
+}
+
+/// Re-reads the registry now that the deployment lock is held.
+///
+/// Everything read before the lock was acquired is a snapshot of a database
+/// another Zapadka run may have been in the middle of changing. Acting on it
+/// is a time-of-check-to-time-of-use bug with real consequences: a migration
+/// that was a graph leaf when it was checked may have gained a dependent by
+/// the time it is reverted.
+///
+/// So mutating commands read once to report the target and check the server,
+/// then read again under the lock and decide from that.
+pub async fn refresh_state(
+    client: &zapadka_pg::Client,
+    config: &LoadedConfig,
+    schema: &str,
+) -> Result<RegistryState> {
+    let state = registry::read(client, schema).await?;
+    registry::check_project(&state, config.config.project.id)?;
+    Ok(state)
 }
 
 /// Requires that the registry exists, for commands that cannot create it.

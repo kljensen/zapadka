@@ -91,12 +91,12 @@ pub async fn run(
         // A fresh connection per file, so no session state can leak between
         // them: a temporary table, a `SET`, a prepared statement, a sequence
         // value. A suite whose result depends on file order is not a suite.
-        let (pg_config, source) = zapadka_pg::resolve(
+        let resolved = zapadka_pg::resolve(
             &opened.name,
             config.config.targets.get(&opened.name),
             args.target.uri.as_deref(),
         )?;
-        let mut connection = zapadka_pg::connect(&pg_config, source, None).await?;
+        let mut connection = zapadka_pg::connect(&resolved).await?;
 
         let outcome = testrun::run_file(&mut connection.client, file, &application_schemas).await;
         if !outcome.passed() {
