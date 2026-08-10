@@ -264,6 +264,120 @@ impl Runner {
         result
     }
 
+    /// Reverts one migration inside a transaction Zapadka owns.
+    ///
+    /// The revert SQL and the removal of the applied-state row commit together,
+    /// exactly as a deploy does, so a crash cannot leave a migration whose SQL
+    /// was undone but which the registry still calls applied.
+    pub async fn revert(&mut self, migration: &Migration) -> Result<ScriptOutcome> {
+        let script = migration.revert.as_ref().ok_or_else(|| {
+            Error::new(
+                zapadka_core::error::ErrorCode::MigrationMissingScript,
+                format!("{} has no revert.sql", migration.relative_dir),
+            )
+        })?;
+
+        let started = Instant::now();
+        let result = self
+            .revert_inner(migration, &script.sql, &script.relative_path)
+            .await;
+        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        let outcome = if result.is_ok() {
+            "succeeded"
+        } else {
+            "failed"
+        };
+        let error = result.as_ref().err();
+        let _ = self
+            .record(Event {
+                migration_id: Some(migration.id),
+                action: "revert",
+                outcome,
+                transaction_mode: Some("required"),
+                definition_sha256: Some(&migration.definition_sha256),
+                script_role: Some("revert"),
+                // The exact bytes reverted. `revert.sql` is mutable, so a past
+                // revert only means something alongside the script that ran.
+                script_sha256: Some(&script.sha256),
+                duration_ms: Some(duration_ms),
+                error,
+            })
+            .await;
+
+        result?;
+        Ok(ScriptOutcome {
+            role: ScriptRole::Revert,
+            path: script.relative_path.clone(),
+            sha256: script.sha256.clone(),
+            duration_ms,
+        })
+    }
+
+    /// The transactional body of a revert.
+    async fn revert_inner(&mut self, migration: &Migration, sql: &str, path: &str) -> Result<()> {
+        let transaction = self
+            .client
+            .transaction()
+            .await
+            .map_err(|error| registry_failed(error, "begin the revert transaction"))?;
+
+        apply_timeouts(&transaction, self.timeouts).await?;
+
+        transaction
+            .batch_execute(sql)
+            .await
+            .map_err(|error| script_failed(error, ScriptRole::Revert, path))?;
+
+        registry::remove_applied(&transaction, &self.schema, migration.id).await?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(|error| registry_failed(error, "commit the revert"))?;
+        Ok(())
+    }
+
+    /// Records migrations as applied without running any of their SQL.
+    ///
+    /// All of them commit together: a partially baselined closure would be a
+    /// history nobody asserted and nobody can explain.
+    pub async fn baseline(&mut self, migrations: &[&Migration]) -> Result<()> {
+        let transaction = self
+            .client
+            .transaction()
+            .await
+            .map_err(|error| registry_failed(error, "begin the baseline transaction"))?;
+
+        for migration in migrations {
+            registry::record_applied(&transaction, &self.schema, self.run_id, migration).await?;
+        }
+
+        transaction
+            .commit()
+            .await
+            .map_err(|error| registry_failed(error, "commit the baseline"))?;
+
+        // Recorded after the commit, so an event never claims a baseline that
+        // did not happen.
+        for migration in migrations {
+            let _ = self
+                .record(Event {
+                    migration_id: Some(migration.id),
+                    action: "baseline",
+                    outcome: "succeeded",
+                    transaction_mode: Some(migration.manifest.transaction.as_str()),
+                    definition_sha256: Some(&migration.definition_sha256),
+                    script_role: None,
+                    script_sha256: None,
+                    duration_ms: None,
+                    error: None,
+                })
+                .await;
+        }
+        Ok(())
+    }
+
     /// Records an event for something that happened outside a migration, such
     /// as creating the registry.
     pub async fn record_run_event(&mut self, action: &str, outcome: &str) -> Result<()> {

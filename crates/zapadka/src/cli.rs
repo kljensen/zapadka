@@ -56,6 +56,12 @@ pub enum Command {
 
     /// Run verification for migrations already applied to the target.
     Verify(VerifyArgs),
+
+    /// Undo one applied migration that nothing else depends on.
+    Revert(RevertArgs),
+
+    /// Record migrations as applied without running them.
+    Baseline(BaselineArgs),
 }
 
 impl Command {
@@ -68,6 +74,8 @@ impl Command {
             Self::Status(_) => "status",
             Self::Deploy(_) => "deploy",
             Self::Verify(_) => "verify",
+            Self::Revert(_) => "revert",
+            Self::Baseline(_) => "baseline",
         }
     }
 }
@@ -158,6 +166,44 @@ pub struct VerifyArgs {
     /// Verify only these migrations. Defaults to every applied migration.
     #[arg(value_name = "ID")]
     pub migrations: Vec<String>,
+
+    /// How long to wait for the deployment lock.
+    #[arg(long, value_name = "DURATION", value_parser = parse_timeout)]
+    pub wait: Option<Timeout>,
+}
+
+#[derive(Debug, Args)]
+pub struct RevertArgs {
+    #[command(flatten)]
+    pub target: TargetArgs,
+
+    /// The migration to revert, as an id, an id prefix, or a slug.
+    ///
+    /// It must be applied, reversible, and a leaf: nothing else applied may
+    /// depend on it. Reverting several migrations means running this several
+    /// times, in an order you choose.
+    pub migration: String,
+
+    /// How long to wait for the deployment lock.
+    #[arg(long, value_name = "DURATION", value_parser = parse_timeout)]
+    pub wait: Option<Timeout>,
+}
+
+#[derive(Debug, Args)]
+pub struct BaselineArgs {
+    #[command(flatten)]
+    pub target: TargetArgs,
+
+    /// Record this migration and everything it depends on as applied.
+    #[arg(long, value_name = "ID")]
+    pub to: String,
+
+    /// State that the schema these migrations describe is already present.
+    ///
+    /// Required. Zapadka cannot check that a database matches the migrations
+    /// being recorded, so the claim has to be made by a person.
+    #[arg(long)]
+    pub acknowledge_existing_schema: bool,
 
     /// How long to wait for the deployment lock.
     #[arg(long, value_name = "DURATION", value_parser = parse_timeout)]

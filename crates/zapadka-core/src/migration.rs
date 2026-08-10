@@ -82,9 +82,17 @@ pub struct Script {
 }
 
 impl Script {
-    /// Whether the script has no SQL in it at all.
-    pub fn is_effectively_empty(&self) -> bool {
-        self.sql.trim().is_empty()
+    /// Whether the script would execute no statements.
+    ///
+    /// A file of nothing but comments is as much a no-op as an empty one, and
+    /// far more likely to be mistaken for real work. The parser is what knows
+    /// the difference, so a script that does not parse is not called empty —
+    /// it has a different, louder problem.
+    pub fn runs_nothing(&self) -> bool {
+        if self.sql.trim().is_empty() {
+            return true;
+        }
+        zapadka_parser::parse(&self.sql).is_ok_and(|parsed| parsed.statements.is_empty())
     }
 }
 

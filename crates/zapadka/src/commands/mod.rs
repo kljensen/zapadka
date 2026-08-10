@@ -4,10 +4,12 @@
 //! returns `Ok(())` or one [`zapadka_core::error::Error`]. None of them print
 //! anything or choose an exit code; that belongs to the report.
 
+pub mod baseline;
 pub mod deploy;
 pub mod init;
 pub mod lint;
 pub mod new;
+pub mod revert;
 pub mod status;
 pub mod target;
 pub mod verify;

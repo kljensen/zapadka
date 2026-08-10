@@ -556,3 +556,210 @@ fn an_unencrypted_connection_is_reported() {
         report.diagnostic_codes()
     );
 }
+
+#[test]
+fn reverts_a_leaf_and_removes_it_from_applied_state() {
+    let db = database();
+    let project = project();
+    project.migration_with(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint PRIMARY KEY);",
+        Some("DROP TABLE public.orders;"),
+        None,
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+    assert!(db.has_relation("public.orders"));
+
+    let report = project.report(&["revert", "--uri", &db.uri(), "create-orders"]);
+    report.assert_success();
+
+    // The revert SQL and the removal of the applied-state row commit together.
+    assert!(!db.has_relation("public.orders"));
+    assert_eq!(
+        db.scalar("SELECT count(*) FROM zapadka.applied_migrations"),
+        "0"
+    );
+    // The history keeps both facts: it was applied, and it was reverted.
+    assert_eq!(
+        db.scalar(
+            "SELECT count(*) FROM zapadka.events WHERE action = 'revert' AND outcome = 'succeeded'"
+        ),
+        "1"
+    );
+
+    // Having been reverted, it is pending again.
+    let status = project.report(&["status", "--uri", &db.uri()]);
+    assert_eq!(status.slugs_with_status("pending"), ["create-orders"]);
+}
+
+#[test]
+fn refuses_to_revert_a_migration_something_applied_depends_on() {
+    let db = database();
+    let project = project();
+    let base = project.migration_with(
+        "base",
+        &[],
+        "CREATE TABLE public.orders (id bigint PRIMARY KEY);",
+        Some("DROP TABLE public.orders;"),
+        None,
+    );
+    project.migration_with(
+        "dependent",
+        &[base],
+        "ALTER TABLE public.orders ADD COLUMN status text;",
+        Some("ALTER TABLE public.orders DROP COLUMN status;"),
+        None,
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // Reverting the base would strand the dependent on a schema its own
+    // migration no longer describes.
+    let report = project.report(&["revert", "--uri", &db.uri(), "base"]);
+    report.assert_failed("migration.reversibility_invalid", exit::VALIDATION);
+    assert!(report.error_context("dependents").contains("dependent"));
+    assert!(db.has_relation("public.orders"), "nothing was reverted");
+
+    // Reverting the leaf first makes the base revertable, one at a time.
+    project
+        .report(&["revert", "--uri", &db.uri(), "dependent"])
+        .assert_success();
+    project
+        .report(&["revert", "--uri", &db.uri(), "base"])
+        .assert_success();
+    assert!(!db.has_relation("public.orders"));
+}
+
+#[test]
+fn refuses_to_revert_a_migration_declared_irreversible() {
+    let db = database();
+    let project = project();
+    // `migration` without a revert script is declared irreversible.
+    project.migration("drop-legacy", &[], "CREATE TABLE public.t (i int);");
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    let report = project.report(&["revert", "--uri", &db.uri(), "drop-legacy"]);
+    report.assert_failed("migration.reversibility_invalid", exit::VALIDATION);
+    assert!(!report.error_context("reason").is_empty());
+}
+
+#[test]
+fn a_failing_revert_leaves_the_migration_applied() {
+    let db = database();
+    let project = project();
+    project.migration_with(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint PRIMARY KEY);",
+        Some("DROP TABLE public.does_not_exist;"),
+        None,
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    let report = project.report(&["revert", "--uri", &db.uri(), "create-orders"]);
+    report.assert_failed("revert.failed", exit::EXECUTION);
+
+    // The revert transaction rolled back, so the migration is still applied and
+    // its table is still there. Zapadka does not half-revert.
+    assert!(db.has_relation("public.orders"));
+    assert_eq!(
+        db.scalar("SELECT count(*) FROM zapadka.applied_migrations"),
+        "1"
+    );
+}
+
+#[test]
+fn baseline_records_a_closure_without_running_any_sql() {
+    let db = database();
+    let project = project();
+    let base = project.migration("base", &[], "CREATE TABLE public.will_not_run (i int);");
+    let tip = project.migration(
+        "tip",
+        &[base],
+        "CREATE TABLE public.also_will_not_run (i int);",
+    );
+    // On another branch, so not part of the tip's closure.
+    project.migration(
+        "unrelated",
+        &[base],
+        "CREATE TABLE public.unrelated (i int);",
+    );
+
+    let report = project.report(&[
+        "baseline",
+        "--uri",
+        &db.uri(),
+        "--to",
+        "tip",
+        "--acknowledge-existing-schema",
+    ]);
+    report.assert_success();
+
+    // Recorded as applied...
+    assert_eq!(
+        db.scalar("SELECT string_agg(slug, ',' ORDER BY slug) FROM zapadka.applied_migrations"),
+        "base,tip"
+    );
+    // ...but none of their SQL ran.
+    assert!(!db.has_relation("public.will_not_run"));
+    assert!(!db.has_relation("public.also_will_not_run"));
+    // The unrelated branch is not part of the closure and stays pending.
+    let status = project.report(&["status", "--uri", &db.uri()]);
+    assert_eq!(status.slugs_with_status("pending"), ["unrelated"]);
+    let _ = tip;
+}
+
+#[test]
+fn baseline_requires_the_operator_to_state_the_claim() {
+    let db = database();
+    let project = project();
+    project.migration("base", &[], "CREATE TABLE public.t (i int);");
+
+    // Zapadka cannot verify that a schema matches, so the claim has to be made
+    // explicitly rather than implied by running the command.
+    let report = project.report(&["baseline", "--uri", &db.uri(), "--to", "base"]);
+    report.assert_failed("config.invalid", 3);
+    assert_eq!(
+        db.scalar("SELECT count(*) FROM pg_namespace WHERE nspname = 'zapadka'"),
+        "0"
+    );
+}
+
+#[test]
+fn a_baselined_project_deploys_only_what_follows_it() {
+    let db = database();
+    let project = project();
+    let base = project.migration("base", &[], "CREATE TABLE public.pre_existing (i int);");
+    project.migration(
+        "next",
+        &[base],
+        "CREATE TABLE public.genuinely_new (i int);",
+    );
+
+    // Pretend the base schema is already there, as it would be for a project
+    // adopting Zapadka.
+    db.query("CREATE TABLE public.pre_existing (i int)");
+    project
+        .report(&[
+            "baseline",
+            "--uri",
+            &db.uri(),
+            "--to",
+            "base",
+            "--acknowledge-existing-schema",
+        ])
+        .assert_success();
+
+    let report = project.report(&["deploy", "--uri", &db.uri()]);
+    report.assert_success();
+    assert_eq!(report.slugs_with_status("succeeded"), ["next"]);
+    assert!(db.has_relation("public.genuinely_new"));
+}

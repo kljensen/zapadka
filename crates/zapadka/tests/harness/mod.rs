@@ -21,6 +21,9 @@
 #![allow(clippy::panic)]
 // A test harness module is reachable only from its own test binary.
 #![allow(unreachable_pub)]
+// The advisory-lock key is deliberately narrowed to the two signed 32-bit
+// catalog columns, mirroring zapadka_pg::lock.
+#![allow(clippy::cast_possible_truncation)]
 
 use std::process::Command;
 use std::sync::OnceLock;
@@ -486,6 +489,8 @@ pub struct LockHolder {
     child: std::process::Child,
     uri: String,
     backend_pid: String,
+    /// Reused on teardown to confirm the lock is genuinely gone.
+    holder_query: String,
 }
 
 impl Drop for LockHolder {
@@ -500,6 +505,19 @@ impl Drop for LockHolder {
         );
         let _ = self.child.kill();
         let _ = self.child.wait();
+
+        // Terminating a backend is asynchronous. Waiting for the lock to
+        // actually be gone means the next command in a test is not racing this
+        // teardown.
+        for _ in 0..100 {
+            let still_held = try_psql(&self.uri, &self.holder_query)
+                .map(|rows| !rows.trim().is_empty())
+                .unwrap_or(false);
+            if !still_held {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 }
 
@@ -543,11 +561,15 @@ pub fn hold_deployment_lock(database: &Database, project_root: &Utf8Path) -> Loc
 
     // Wait until the lock is genuinely held before returning, so the test that
     // follows exercises contention rather than racing this setup.
+    //
+    // The two catalog columns are signed 32-bit, so the halves are narrowed in
+    // Rust exactly as `zapadka_pg::lock` does. Interpolating the raw halves
+    // would overflow `int` whenever the low word exceeds i32::MAX.
     let holder_query = format!(
         "SELECT pid FROM pg_locks WHERE locktype = 'advisory' \
          AND classid = {}::bigint::int AND objid = {}::bigint::int AND granted",
-        key >> 32,
-        key & 0xffff_ffff
+        (key >> 32) as i32,
+        (key & 0xffff_ffff) as i32
     );
     for _ in 0..100 {
         if let Ok(output) = try_psql(&uri, &holder_query) {
@@ -557,6 +579,7 @@ pub fn hold_deployment_lock(database: &Database, project_root: &Utf8Path) -> Loc
                     child,
                     uri,
                     backend_pid: pid.to_owned(),
+                    holder_query,
                 };
             }
         }

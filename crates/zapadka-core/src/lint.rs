@@ -172,7 +172,7 @@ fn check_script(
     policy: &Policy,
     findings: &mut Findings,
 ) {
-    if script.is_effectively_empty() {
+    if script.runs_nothing() {
         // Not an error: an empty `verify.sql` is odd but harmless, and an empty
         // `deploy.sql` may be a placeholder that a later commit fills in.
         findings.diagnostics.push(warn(
@@ -733,6 +733,16 @@ mod tests {
                 "{sql}: {:?}",
                 findings.diagnostics
             );
+        }
+    }
+
+    #[test]
+    fn a_script_of_nothing_but_comments_is_reported_as_empty() {
+        // Far more likely to be mistaken for real work than a blank file, and
+        // just as much a no-op.
+        for sql in ["", "   \n", "-- TODO: write this\n", "/* later */"] {
+            let findings = lint(sql);
+            assert_eq!(codes_of(&findings), [codes::EMPTY_SCRIPT], "{sql:?}");
         }
     }
 

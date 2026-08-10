@@ -19,7 +19,7 @@ BINARY="$(cd "$(dirname "$BINARY")" && pwd)/$(basename "$BINARY")"
 POSTGRES_IMAGE="postgres@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15"
 # A minimal image with no libc of its own beyond busybox's, so a binary that
 # needed a shared library would fail here rather than in someone's production.
-RUNNER_IMAGE="busybox:1.37"
+RUNNER_IMAGE="${ZAPADKA_RUNNER_IMAGE:-busybox:1.37}"
 
 NETWORK="zapadka-smoke-$$"
 CONTAINER="zapadka-smoke-postgres-$$"
@@ -32,11 +32,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# macOS ships `shasum`; Linux ships `sha256sum`.
+digest() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi; }
+
 say() { printf '\n=== %s ===\n' "$1"; }
 
 # Runs the binary inside the minimal container.
 zapadka() {
-  docker run --rm --network "$NETWORK" \
+  docker run --rm --network "$NETWORK" ${ZAPADKA_PLATFORM:+--platform "$ZAPADKA_PLATFORM"} \
     -v "$BINARY:/zapadka:ro" \
     -v "$WORKDIR:/project" \
     -w /project \
@@ -119,8 +122,25 @@ docker exec "$CONTAINER" psql -U postgres -d app -tAc \
 
 say "a modified deployed migration is detected"
 echo "-- an edit made after deployment" >> "$WORKDIR/migrations/$FIRST/deploy.sql"
+
+# Wait until the container actually observes the edit before asserting on it.
+# On Linux the bind mount is immediate; a macOS file-sharing layer can serve a
+# briefly stale copy, and a test that raced that would be reporting on the
+# mount rather than on Zapadka.
+EXPECTED="$(digest "$WORKDIR/migrations/$FIRST/deploy.sql" | cut -d' ' -f1)"
+for _ in $(seq 1 50); do
+  SEEN="$(docker run --rm ${ZAPADKA_PLATFORM:+--platform "$ZAPADKA_PLATFORM"} \
+    -v "$WORKDIR:/w" "$RUNNER_IMAGE" \
+    sha256sum "/w/migrations/$FIRST/deploy.sql" | cut -d' ' -f1)"
+  [ "$SEEN" = "$EXPECTED" ] && break
+  sleep 0.2
+done
+[ "$SEEN" = "$EXPECTED" ] \
+  || { echo "FAIL: the container never observed the edited file"; exit 1; }
+
 if zapadka status --uri "$URI" --output json > "$WORKDIR/tampered.json" 2>/dev/null; then
   echo "FAIL: editing a deployed migration should have failed"
+  cat "$WORKDIR/tampered.json"
   exit 1
 fi
 grep -q '"code": "history.definition_changed"' "$WORKDIR/tampered.json" \
