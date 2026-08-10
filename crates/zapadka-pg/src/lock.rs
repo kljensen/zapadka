@@ -105,7 +105,12 @@ async fn acquire_key(client: &Client, key: i64, wait: Timeout) -> Result<Deploym
         return Ok(DeploymentLock { key });
     }
 
-    let deadline = std::time::Instant::now() + wait.as_std();
+    // A syntactically valid but enormous `--wait` would overflow the deadline
+    // and panic, abandoning the run without the report it promised. Treated as
+    // "wait as long as this machine can represent" instead.
+    let deadline = std::time::Instant::now()
+        .checked_add(wait.as_std())
+        .unwrap_or_else(|| std::time::Instant::now() + Duration::from_secs(365 * 24 * 60 * 60));
     while std::time::Instant::now() < deadline {
         tokio::time::sleep(POLL_INTERVAL.min(wait.as_std())).await;
         if try_lock(client, key).await? {

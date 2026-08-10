@@ -47,13 +47,7 @@ pub async fn open(
     // And again database-wide, because `registry_schema` is configurable: two
     // projects with different schema names would each see only their own
     // registry and both conclude the database was theirs.
-    check_ownership_under_lock(
-        &connection.client,
-        &schema,
-        config.config.project.id,
-        config.config.policy.advisory_lock_timeout,
-    )
-    .await?;
+    check_ownership(&connection.client, &schema, config.config.project.id).await?;
 
     if !connection.encrypted && !connection.encryption_opted_out {
         session.diagnose(Diagnostic {
@@ -154,34 +148,52 @@ pub async fn refresh_state(
 ) -> Result<RegistryState> {
     let state = registry::read(client, schema).await?;
     registry::check_project(&state, config.config.project.id)?;
-    check_ownership_under_lock(
-        client,
-        schema,
-        config.config.project.id,
-        config.config.policy.advisory_lock_timeout,
-    )
-    .await?;
+    check_ownership(client, schema, config.config.project.id).await?;
     Ok(state)
 }
 
-/// Checks database-wide ownership while holding the ownership lock.
+/// Checks database-wide ownership.
 ///
-/// The lock is database-global rather than project-derived. Two projects first
-/// deploying to the same empty database would otherwise take different
-/// deployment locks, both find no registry, and both create one -- so the claim
-/// has to be serialized on something neither of them chooses.
-///
-/// Held only across the check. Every Zapadka project on a server contends for
-/// this one lock, so holding it for a whole deploy would serialize unrelated
-/// databases.
-async fn check_ownership_under_lock(
+/// A read-only check, used by every command that opens a target so none of them
+/// operates on a database another project owns. It is *not* sufficient on its
+/// own for a command that creates a registry -- see [`claim_and_upgrade`].
+async fn check_ownership(
     client: &zapadka_pg::Client,
     schema: &str,
     project_id: uuid::Uuid,
+) -> Result<()> {
+    registry::check_database_ownership(client, schema, project_id).await
+}
+
+/// Claims the database and creates or upgrades the registry, atomically.
+///
+/// The check and the creation happen under one database-global advisory lock.
+/// Checking under a lock and then releasing it before creating would leave the
+/// race it was meant to close: two projects first deploying to the same empty
+/// database would each take the lock in turn, each see no owner, and each go on
+/// to create a registry in its own schema.
+///
+/// The lock is global rather than project-derived, because the projects
+/// contending for it have by definition not agreed on anything else. It is held
+/// only across the claim, so unrelated databases are not serialized for the
+/// length of a deploy.
+pub async fn claim_and_upgrade(
+    client: &mut zapadka_pg::Client,
+    config: &LoadedConfig,
+    schema: &str,
+    state: &RegistryState,
     wait: zapadka_core::duration::Timeout,
 ) -> Result<()> {
+    let project_id = config.config.project.id;
     let held = zapadka_pg::lock::acquire_ownership(client, wait).await?;
-    let outcome = registry::check_database_ownership(client, schema, project_id).await;
+
+    let outcome = match registry::check_database_ownership(client, schema, project_id).await {
+        Ok(()) => registry::upgrade(client, schema, project_id, crate::session::VERSION, state)
+            .await
+            .map(|_| ()),
+        Err(error) => Err(error),
+    };
+
     let released = held.release(client).await;
     outcome.and(released)
 }

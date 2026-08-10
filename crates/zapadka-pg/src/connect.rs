@@ -82,11 +82,15 @@ pub fn resolve(
     uri: Option<&str>,
 ) -> Result<Resolved> {
     if let Some(uri) = uri {
-        let (uri, root_certificate) = split_root_certificate(uri);
+        let (uri, tls) = split_tls_parameters(uri, target_name)?;
+        let mut config = parse_uri(&uri)?;
+        if let Some(mode) = tls.ssl_mode {
+            config.ssl_mode(mode);
+        }
         return Ok(Resolved {
-            config: parse_uri(&uri)?,
+            config,
             source: Source::CommandLine,
-            root_certificate,
+            root_certificate: tls.root_certificate,
         });
     }
 
@@ -108,11 +112,15 @@ pub fn resolve(
                 "target {target_name:?} takes its connection URI from {variable}"
             ))
         })?;
-        let (uri, root_certificate) = split_root_certificate(&uri);
+        let (uri, tls) = split_tls_parameters(&uri, target_name)?;
+        let mut config = parse_uri(&uri)?;
+        if let Some(mode) = tls.ssl_mode {
+            config.ssl_mode(mode);
+        }
         return Ok(Resolved {
-            config: parse_uri(&uri)?,
+            config,
             source: Source::Environment,
-            root_certificate,
+            root_certificate: tls.root_certificate,
         });
     }
 
@@ -134,35 +142,43 @@ pub fn resolve(
     .with_hint("set pg_service or uri_env on the target, or pass --uri"))
 }
 
-/// Removes `sslrootcert` from a URI and returns it separately.
+/// The TLS parameters lifted out of a URI before tokio-postgres sees it.
+#[derive(Debug, Default)]
+struct UriTls {
+    root_certificate: Option<String>,
+    ssl_mode: Option<SslMode>,
+}
+
+/// Removes the TLS parameters tokio-postgres cannot handle from a URI.
 ///
-/// tokio-postgres rejects the parameter outright, so a URI carrying it could
-/// not connect at all -- which would mean a private certificate authority was
-/// usable only through a service file, despite `--uri` and `uri_env` being
-/// offered as equals.
-fn split_root_certificate(uri: &str) -> (String, Option<String>) {
+/// It rejects `sslrootcert` outright, and knows only `disable`, `prefer`, and
+/// `require` for `sslmode` — so a perfectly standard
+/// `?sslmode=verify-full&sslrootcert=/etc/ssl/ca.pem` would fail to parse at
+/// all. Both are handled here, with the same meanings a service file gets, so
+/// the three ways of naming a target really are equivalent.
+fn split_tls_parameters(uri: &str, name: &str) -> Result<(String, UriTls)> {
     let Some((base, query)) = uri.split_once('?') else {
-        return (uri.to_owned(), None);
+        return Ok((uri.to_owned(), UriTls::default()));
     };
 
-    let mut certificate = None;
-    let kept: Vec<&str> = query
-        .split('&')
-        .filter(|parameter| match parameter.split_once('=') {
-            Some(("sslrootcert", value)) => {
-                certificate = Some(percent_decode(value));
-                false
+    let mut tls = UriTls::default();
+    let mut kept: Vec<&str> = Vec::new();
+    for parameter in query.split('&') {
+        match parameter.split_once('=') {
+            Some(("sslrootcert", value)) => tls.root_certificate = Some(percent_decode(value)),
+            Some(("sslmode", value)) => {
+                tls.ssl_mode = Some(ssl_mode(&percent_decode(value), name)?);
             }
-            _ => true,
-        })
-        .collect();
+            _ => kept.push(parameter),
+        }
+    }
 
     let rebuilt = if kept.is_empty() {
         base.to_owned()
     } else {
         format!("{base}?{}", kept.join("&"))
     };
-    (rebuilt, certificate)
+    Ok((rebuilt, tls))
 }
 
 /// Decodes the percent-escapes a path in a URI query string may carry.
@@ -523,30 +539,40 @@ mod tests {
     }
 
     #[test]
-    fn a_uri_can_carry_a_private_certificate_authority() {
-        // tokio-postgres rejects `sslrootcert` outright, so without lifting it
-        // out a private CA would be usable only through a service file --
-        // despite --uri and uri_env being offered as equals.
-        let (uri, ca) = split_root_certificate(
+    fn a_uri_can_carry_standard_tls_parameters() {
+        // tokio-postgres rejects `sslrootcert` and knows only three `sslmode`
+        // values, so a perfectly standard URI would not have parsed at all.
+        let (uri, tls) = split_tls_parameters(
             "postgresql://db/app?sslmode=verify-full&sslrootcert=%2Fetc%2Fssl%2Fca.pem",
-        );
-        assert_eq!(uri, "postgresql://db/app?sslmode=verify-full");
-        assert_eq!(ca.as_deref(), Some("/etc/ssl/ca.pem"));
-        // The remaining URI must still parse.
+            "production",
+        )
+        .unwrap();
+        assert_eq!(uri, "postgresql://db/app");
+        assert_eq!(tls.root_certificate.as_deref(), Some("/etc/ssl/ca.pem"));
+        assert_eq!(tls.ssl_mode, Some(SslMode::Require));
+        // What remains must be something tokio-postgres accepts.
         parse_uri(&uri).unwrap();
     }
 
     #[test]
-    fn a_uri_without_a_certificate_is_left_alone() {
-        for uri in ["postgresql://db/app", "postgresql://db/app?sslmode=require"] {
-            let (rebuilt, ca) = split_root_certificate(uri);
+    fn a_uri_without_tls_parameters_is_left_alone() {
+        for uri in [
+            "postgresql://db/app",
+            "postgresql://db/app?application_name=zapadka",
+        ] {
+            let (rebuilt, tls) = split_tls_parameters(uri, "production").unwrap();
             assert_eq!(rebuilt, uri);
-            assert_eq!(ca, None);
+            assert_eq!(tls.root_certificate, None);
+            assert_eq!(tls.ssl_mode, None);
         }
         // The only parameter, so the `?` goes with it.
-        let (rebuilt, ca) = split_root_certificate("postgresql://db/app?sslrootcert=/ca.pem");
+        let (rebuilt, tls) =
+            split_tls_parameters("postgresql://db/app?sslrootcert=/ca.pem", "production").unwrap();
         assert_eq!(rebuilt, "postgresql://db/app");
-        assert_eq!(ca.as_deref(), Some("/ca.pem"));
+        assert_eq!(tls.root_certificate.as_deref(), Some("/ca.pem"));
+
+        // A mode Zapadka refuses is refused here too, not deferred.
+        assert!(split_tls_parameters("postgresql://db/app?sslmode=allow", "production").is_err());
     }
 
     #[test]

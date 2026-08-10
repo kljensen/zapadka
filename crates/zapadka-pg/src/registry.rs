@@ -269,7 +269,14 @@ pub async fn find_owning_project(client: &Client) -> Result<Option<(String, Uuid
         .await
         .map_err(|error| registry_failed(error, "read the registry metadata"))?;
 
-    Ok(meta.map(|row| (schema, row.get::<_, Uuid>(0))))
+    // Decoded fallibly. The shape query matches on column names, so an
+    // unrelated table that happens to use them would otherwise panic here
+    // rather than being recognized as not-a-registry.
+    Ok(meta.and_then(|row| {
+        row.try_get::<_, Uuid>(0)
+            .ok()
+            .map(|project_id| (schema, project_id))
+    }))
 }
 
 /// Refuses to act on a database another project already owns.

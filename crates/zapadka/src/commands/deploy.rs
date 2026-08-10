@@ -22,7 +22,7 @@ use zapadka_core::migration::Migration;
 use zapadka_core::report::{Action, MigrationResult, Script, ScriptRole, Status};
 use zapadka_pg::execute::Runner;
 use zapadka_pg::history;
-use zapadka_pg::{ScriptOutcome, lock, registry};
+use zapadka_pg::{ScriptOutcome, lock};
 
 use crate::cli::DeployArgs;
 use crate::commands::target;
@@ -64,7 +64,6 @@ pub async fn run(
         args,
         session,
         client,
-        config,
         &opened.schema,
         opened.timeouts,
         opened.facts,
@@ -86,27 +85,29 @@ async fn deploy_under_lock(
     args: &DeployArgs,
     session: &mut Session,
     mut client: zapadka_pg::Client,
-    loaded: &LoadedConfig,
     schema: &str,
     timeouts: zapadka_pg::Timeouts,
     facts: zapadka_pg::ServerFacts,
 ) -> (zapadka_pg::Client, Result<()>) {
     // Read again now the lock is held. The state gathered while connecting is a
     // snapshot of a database another run may have been changing.
-    let state = match target::refresh_state(&client, loaded, schema).await {
+    let state = match target::refresh_state(&client, config, schema).await {
         Ok(state) => state,
         Err(error) => return (client, Err(error)),
     };
 
     // The registry is created or upgraded under the lock, so two binaries can
     // never race to upgrade it.
+    // The ownership claim and the registry creation happen together, under a
+    // database-global lock. Checking and then creating separately would leave
+    // room for a second project to claim the same empty database in between.
     if !args.dry_run
-        && let Err(error) = registry::upgrade(
+        && let Err(error) = target::claim_and_upgrade(
             &mut client,
+            config,
             schema,
-            config.config.project.id,
-            crate::session::VERSION,
             &state,
+            config.config.policy.advisory_lock_timeout,
         )
         .await
     {

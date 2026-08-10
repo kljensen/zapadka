@@ -81,10 +81,23 @@ pub fn run(root: &Utf8Path, graph: &Graph, args: &NewArgs, session: &mut Session
         );
     }
 
-    write(&dir.join(MANIFEST_FILE_NAME), &manifest)?;
-    write(&dir.join("deploy.sql"), DEPLOY_TEMPLATE)?;
-    if reversibility.is_reversible() {
-        write(&dir.join("revert.sql"), REVERT_TEMPLATE)?;
+    // Written as a unit. A failure partway through -- a full disk, a revoked
+    // permission -- would otherwise leave a directory with a manifest and no
+    // deploy script, which every later command rejects as an invalid package,
+    // and which retrying `new` does not repair because it generates a new id.
+    let written = (|| -> Result<()> {
+        write(&dir.join(MANIFEST_FILE_NAME), &manifest)?;
+        write(&dir.join("deploy.sql"), DEPLOY_TEMPLATE)?;
+        if reversibility.is_reversible() {
+            write(&dir.join("revert.sql"), REVERT_TEMPLATE)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = written {
+        // Best effort: if the directory cannot be removed either, the original
+        // failure is still the more useful thing to report.
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(error);
     }
     // `verify.sql` is deliberately not created. Verification is opt-in per
     // migration, and an empty file would make every migration look verified.

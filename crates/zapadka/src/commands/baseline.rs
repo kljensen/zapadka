@@ -22,7 +22,7 @@ use zapadka_core::graph::Graph;
 use zapadka_core::migration::Migration;
 use zapadka_core::report::{Action, Status};
 use zapadka_pg::execute::Runner;
-use zapadka_pg::{history, lock, registry};
+use zapadka_pg::{history, lock};
 
 use crate::cli::BaselineArgs;
 use crate::commands::{deploy::result_of, target};
@@ -108,12 +108,12 @@ async fn baseline_under_lock(
         Err(error) => return (client, Err(error)),
     };
 
-    if let Err(error) = registry::upgrade(
+    if let Err(error) = target::claim_and_upgrade(
         &mut client,
+        config,
         schema,
-        config.config.project.id,
-        crate::session::VERSION,
         &state,
+        config.config.policy.advisory_lock_timeout,
     )
     .await
     {
