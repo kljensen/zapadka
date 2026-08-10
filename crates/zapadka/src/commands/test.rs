@@ -77,6 +77,7 @@ pub async fn run(
 
     let (name, server_version) = (opened.name.clone(), opened.facts.server_version.clone());
     let schema = opened.schema.clone();
+    let timeouts = opened.timeouts;
     let mut client = opened.connection.client;
 
     // Taken before the pgTAP install and held until the last file has run.
@@ -98,6 +99,7 @@ pub async fn run(
         &server_version,
         &selected,
         &application_schemas,
+        timeouts,
     )
     .await;
 
@@ -118,6 +120,7 @@ async fn run_suite(
     server_version: &str,
     selected: &[testsuite::TestFile],
     application_schemas: &[String],
+    timeouts: zapadka_pg::Timeouts,
 ) -> Result<()> {
     // Read again now the lock is held: a deploy or revert from another checkout
     // could have finished while this command was waiting, and the suite would
@@ -155,7 +158,8 @@ async fn run_suite(
         )?;
         let mut connection = zapadka_pg::connect(&resolved).await?;
 
-        let outcome = testrun::run_file(&mut connection.client, file, application_schemas).await;
+        let outcome =
+            testrun::run_file(&mut connection.client, file, application_schemas, timeouts).await;
         if !outcome.passed() {
             failures += 1;
         }

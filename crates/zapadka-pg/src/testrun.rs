@@ -37,6 +37,7 @@ use zapadka_core::tap::{self, TapDocument};
 use zapadka_core::testsuite::TestFile;
 
 use crate::error::registry_failed;
+use crate::execute::Timeouts;
 use crate::pgtap;
 
 /// What one test file did.
@@ -67,10 +68,11 @@ pub async fn run_file(
     client: &mut Client,
     file: &TestFile,
     application_schemas: &[String],
+    timeouts: Timeouts,
 ) -> TestOutcome {
     let started = Instant::now();
     let mut advanced = Vec::new();
-    let result = run_inner(client, file, application_schemas, &mut advanced).await;
+    let result = run_inner(client, file, application_schemas, timeouts, &mut advanced).await;
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     match result {
@@ -94,6 +96,7 @@ async fn run_inner(
     client: &mut Client,
     file: &TestFile,
     application_schemas: &[String],
+    timeouts: Timeouts,
     advanced: &mut Vec<AdvancedSequence>,
 ) -> Result<TapDocument> {
     // A test file that commits would escape the rollback: the whole file is
@@ -110,6 +113,12 @@ async fn run_inner(
         .transaction()
         .await
         .map_err(|error| registry_failed(error, "begin the test transaction"))?;
+
+    // The target's configured limits apply here too. A test blocked on a lock,
+    // or looping in a query, should be cut off by the same `lock_timeout` and
+    // `statement_timeout` a migration would be -- otherwise a suite can hang
+    // indefinitely on a target that explicitly asked it not to.
+    crate::execute::apply_timeouts(&transaction, timeouts).await?;
 
     transaction
         .batch_execute(&format!(

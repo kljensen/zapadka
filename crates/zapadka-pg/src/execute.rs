@@ -679,7 +679,10 @@ struct Event<'a> {
 ///
 /// `SET LOCAL` so they last exactly as long as the transaction Zapadka opened
 /// and cannot leak into the next one.
-async fn apply_timeouts(transaction: &PgTransaction<'_>, timeouts: Timeouts) -> Result<()> {
+pub(crate) async fn apply_timeouts(
+    transaction: &PgTransaction<'_>,
+    timeouts: Timeouts,
+) -> Result<()> {
     for (setting, value) in [
         ("lock_timeout", timeouts.lock_timeout),
         ("statement_timeout", timeouts.statement_timeout),

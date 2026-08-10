@@ -238,10 +238,13 @@ pub async fn server_facts(client: &Client) -> Result<ServerFacts> {
 /// So ownership is established database-wide, by looking for the shape of a
 /// Zapadka `meta` table rather than for a particular schema name.
 pub async fn find_owning_project(client: &Client) -> Result<Option<(String, Uuid)>> {
-    // Matched on the column set, which is distinctive enough that an unrelated
-    // table called `meta` will not collide.
-    let row = client
-        .query_opt(
+    // Matched on the column set, which is distinctive but not proof: an
+    // unrelated table called `meta` could use the same three names. So every
+    // candidate is inspected rather than only the first -- stopping at one
+    // would let a look-alike that sorts earlier hide the real registry behind
+    // it, and a project could then claim a database that already has an owner.
+    let candidates = client
+        .query(
             "SELECT n.nspname \
              FROM pg_class c \
              JOIN pg_namespace n ON n.oid = c.relnamespace \
@@ -251,32 +254,53 @@ pub async fn find_owning_project(client: &Client) -> Result<Option<(String, Uuid
                     WHERE a.attrelid = c.oid AND NOT a.attisdropped \
                       AND a.attname IN ('singleton', 'project_id', \
                                         'registry_format_version')) = 3 \
-             ORDER BY n.nspname \
-             LIMIT 1",
+             ORDER BY n.nspname",
             &[],
         )
         .await
         .map_err(|error| registry_failed(error, "look for an existing Zapadka registry"))?;
 
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let schema: String = row.get(0);
+    let mut found: Vec<(String, Uuid)> = Vec::new();
+    for row in candidates {
+        let schema: String = row.get(0);
+        let quoted = quote_identifier(&schema);
 
-    let quoted = quote_identifier(&schema);
-    let meta = client
-        .query_opt(&format!("SELECT project_id FROM {quoted}.meta"), &[])
-        .await
-        .map_err(|error| registry_failed(error, "read the registry metadata"))?;
+        // A table Zapadka cannot read, or whose `project_id` is not a UUID, is
+        // something else that happens to share the column names.
+        let Ok(Some(meta)) = client
+            .query_opt(&format!("SELECT project_id FROM {quoted}.meta"), &[])
+            .await
+        else {
+            continue;
+        };
+        let Ok(project_id) = meta.try_get::<_, Uuid>(0) else {
+            continue;
+        };
+        found.push((schema, project_id));
+    }
 
-    // Decoded fallibly. The shape query matches on column names, so an
-    // unrelated table that happens to use them would otherwise panic here
-    // rather than being recognized as not-a-registry.
-    Ok(meta.and_then(|row| {
-        row.try_get::<_, Uuid>(0)
-            .ok()
-            .map(|project_id| (schema, project_id))
-    }))
+    match found.as_slice() {
+        [] => Ok(None),
+        [(schema, project_id)] => Ok(Some((schema.clone(), *project_id))),
+        many => {
+            // Two registries in one database is a state Zapadka will not
+            // create and cannot reason about: `status` would describe one
+            // history while the other silently diverged.
+            let schemas: Vec<&str> = many.iter().map(|(schema, _)| schema.as_str()).collect();
+            Err(Error::new(
+                ErrorCode::RegistryProjectMismatch,
+                format!(
+                    "this database holds {} Zapadka registries, in schemas {}",
+                    many.len(),
+                    schemas.join(" and ")
+                ),
+            )
+            .with_hint(
+                "one database holds one project's history. Zapadka will not act on a database \
+                 with more than one registry, because it cannot tell which history describes it.",
+            ))
+        }
+    }
 }
 
 /// Refuses to act on a database another project already owns.
