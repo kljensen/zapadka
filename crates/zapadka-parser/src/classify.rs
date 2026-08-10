@@ -92,6 +92,11 @@ pub enum StatementKind {
     },
     /// Reclaims storage. PostgreSQL forbids this inside a transaction block.
     Vacuum,
+    /// A statement PostgreSQL refuses to run inside a transaction block at all,
+    /// such as `CREATE DATABASE` or `ALTER SYSTEM`.
+    ///
+    /// Carries the SQL spelling so a diagnostic can name what it found.
+    NonTransactional(&'static str),
     /// Rebuilds an index.
     Reindex {
         /// Whether `CONCURRENTLY` was given, which PostgreSQL forbids inside a
@@ -127,6 +132,7 @@ impl StatementKind {
             } => Some("DROP INDEX CONCURRENTLY"),
             Self::Reindex { concurrent: true } => Some("REINDEX CONCURRENTLY"),
             Self::Vacuum => Some("VACUUM"),
+            Self::NonTransactional(construct) => Some(construct),
             _ => None,
         }
     }
@@ -436,6 +442,16 @@ fn kind(node_type: &str, body: &Value) -> StatementKind {
         // `is_vacuumcmd`. The difference matters: ANALYZE runs happily inside a
         // transaction block, VACUUM does not.
         "VacuumStmt" if flag(body, "is_vacuumcmd") => StatementKind::Vacuum,
+        // PostgreSQL refuses these inside a transaction block outright. Without
+        // them here, a migration using the default transactional mode passes
+        // lint, connects to the target, and only then fails -- which is exactly
+        // the confusion the embedded parser exists to prevent.
+        "CreatedbStmt" => StatementKind::NonTransactional("CREATE DATABASE"),
+        "DropdbStmt" => StatementKind::NonTransactional("DROP DATABASE"),
+        "CreateTableSpaceStmt" => StatementKind::NonTransactional("CREATE TABLESPACE"),
+        "DropTableSpaceStmt" => StatementKind::NonTransactional("DROP TABLESPACE"),
+        "AlterSystemStmt" => StatementKind::NonTransactional("ALTER SYSTEM"),
+        "DiscardStmt" => StatementKind::NonTransactional("DISCARD"),
         "ReindexStmt" => StatementKind::Reindex {
             // `CONCURRENTLY` arrives as a named parameter rather than a flag.
             concurrent: body
@@ -815,6 +831,27 @@ mod tests {
             assert!(
                 kinds(sql)[0].forbidden_in_transaction().is_some(),
                 "{sql} cannot run inside a transaction block"
+            );
+        }
+    }
+
+    #[test]
+    fn identifies_statements_that_cannot_run_in_a_transaction_at_all() {
+        for (sql, construct) in [
+            ("CREATE DATABASE app", "CREATE DATABASE"),
+            ("DROP DATABASE app", "DROP DATABASE"),
+            (
+                "CREATE TABLESPACE fast LOCATION '/mnt/fast'",
+                "CREATE TABLESPACE",
+            ),
+            ("DROP TABLESPACE fast", "DROP TABLESPACE"),
+            ("ALTER SYSTEM SET work_mem = '4MB'", "ALTER SYSTEM"),
+            ("DISCARD ALL", "DISCARD"),
+        ] {
+            assert_eq!(
+                kinds(sql)[0].forbidden_in_transaction(),
+                Some(construct),
+                "{sql}"
             );
         }
     }

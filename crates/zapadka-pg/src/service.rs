@@ -17,8 +17,9 @@ pub type ServiceSettings = BTreeMap<String, String>;
 
 /// Finds and reads the settings for `name`.
 ///
-/// Search order matches `libpq`: `PGSERVICEFILE`, then
-/// `$PGSYSCONFDIR/pg_service.conf`, then `~/.pg_service.conf`.
+/// Search order matches `libpq`: `PGSERVICEFILE`, then the per-user
+/// `~/.pg_service.conf`, then the system-wide
+/// `$PGSYSCONFDIR/pg_service.conf`.
 pub fn lookup(name: &str) -> Result<ServiceSettings> {
     let mut searched = Vec::new();
     for path in candidate_paths() {
@@ -44,16 +45,22 @@ pub fn lookup(name: &str) -> Result<ServiceSettings> {
 }
 
 /// The service files to search, in `libpq`'s order.
+///
+/// The per-user file comes before the system-wide one, because that is what
+/// libpq does: "if the same service name exists in both the user and the system
+/// file, the user file takes precedence". Searching them the other way round
+/// would make Zapadka connect somewhere `psql` would not, which is the worst
+/// possible disagreement for a tool that deploys migrations.
 fn candidate_paths() -> Vec<String> {
     let mut paths = Vec::new();
     if let Ok(file) = std::env::var("PGSERVICEFILE") {
         paths.push(file);
     }
-    if let Ok(dir) = std::env::var("PGSYSCONFDIR") {
-        paths.push(format!("{dir}/pg_service.conf"));
-    }
     if let Ok(home) = std::env::var("HOME") {
         paths.push(format!("{home}/.pg_service.conf"));
+    }
+    if let Ok(dir) = std::env::var("PGSYSCONFDIR") {
+        paths.push(format!("{dir}/pg_service.conf"));
     }
     paths
 }

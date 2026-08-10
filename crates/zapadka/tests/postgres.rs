@@ -1230,3 +1230,74 @@ fn a_test_file_cannot_leak_sequence_state_to_the_next_one() {
         "the suite advanced a sequence on the target"
     );
 }
+
+#[test]
+fn the_events_table_cannot_be_truncated() {
+    let db = database();
+    let project = project();
+    project.migration("first", &[], "CREATE TABLE public.a (i int);");
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // TRUNCATE is neither an UPDATE nor a DELETE, so the row-level trigger
+    // never sees it. Without a statement-level trigger the table's owner --
+    // normally the deploying role -- could erase the whole history.
+    assert!(
+        harness::try_sql(&db, "TRUNCATE zapadka.events").is_err(),
+        "TRUNCATE should have been refused by the registry"
+    );
+    assert_ne!(db.scalar("SELECT count(*) FROM zapadka.events"), "0");
+}
+
+#[test]
+fn a_statement_postgresql_forbids_in_a_transaction_is_caught_before_connecting() {
+    let project = project();
+    // CREATE DATABASE cannot run inside a transaction block at all. Without
+    // classifying it, this would pass lint, connect, and only then fail.
+    project.migration("make-a-database", &[], "CREATE DATABASE other;");
+
+    let report = project.report(&["deploy", "--uri", "postgresql://nobody@127.0.0.1:1/nothing"]);
+    report.assert_failed("script.statement_count", exit::VALIDATION);
+    assert!(
+        report.json["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("CREATE DATABASE"),
+        "{}",
+        report.json["error"]["message"]
+    );
+}
+
+#[test]
+fn a_successful_revert_records_exactly_one_event_atomically() {
+    let db = database();
+    let project = project();
+    project.migration_with(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint PRIMARY KEY);",
+        Some("DROP TABLE public.orders;"),
+        None,
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+    project
+        .report(&["revert", "--uri", &db.uri(), "create-orders"])
+        .assert_success();
+
+    // Exactly one: the event commits inside the transaction that performed the
+    // revert, so it is neither missing nor duplicated.
+    assert_eq!(
+        db.scalar(
+            "SELECT count(*) FROM zapadka.events \
+             WHERE action = 'revert' AND outcome = 'succeeded'"
+        ),
+        "1"
+    );
+    assert_eq!(
+        db.scalar("SELECT count(*) FROM zapadka.applied_migrations"),
+        "0"
+    );
+}

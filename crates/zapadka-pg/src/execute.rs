@@ -335,31 +335,32 @@ impl Runner {
 
         let started = Instant::now();
         let result = self
-            .revert_inner(migration, &script.sql, &script.relative_path)
+            .revert_inner(migration, &script.sql, &script.relative_path, started)
             .await;
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-        let outcome = if result.is_ok() {
-            "succeeded"
-        } else {
-            "failed"
-        };
-        let error = result.as_ref().err();
-        let _ = self
-            .record(Event {
-                migration_id: Some(migration.id),
-                action: "revert",
-                outcome,
-                transaction_mode: Some("required"),
-                definition_sha256: Some(&migration.definition_sha256),
-                script_role: Some("revert"),
-                // The exact bytes reverted. `revert.sql` is mutable, so a past
-                // revert only means something alongside the script that ran.
-                script_sha256: Some(&script.sha256),
-                duration_ms: Some(duration_ms),
-                error,
-            })
-            .await;
+        // Only the failure event is written here. A successful revert records
+        // its event inside the transaction that performed it, so the removal
+        // and its evidence cannot diverge — and writing it again here would
+        // put two of them in the history.
+        if let Err(error) = &result {
+            let _ = self
+                .record(Event {
+                    migration_id: Some(migration.id),
+                    action: "revert",
+                    outcome: "failed",
+                    transaction_mode: Some("required"),
+                    definition_sha256: Some(&migration.definition_sha256),
+                    script_role: Some("revert"),
+                    // The exact bytes reverted. `revert.sql` is mutable, so a
+                    // past revert only means something alongside the script
+                    // that ran.
+                    script_sha256: Some(&script.sha256),
+                    duration_ms: Some(duration_ms),
+                    error: Some(error),
+                })
+                .await;
+        }
 
         result?;
         Ok(ScriptOutcome {
@@ -371,7 +372,13 @@ impl Runner {
     }
 
     /// The transactional body of a revert.
-    async fn revert_inner(&mut self, migration: &Migration, sql: &str, path: &str) -> Result<()> {
+    async fn revert_inner(
+        &mut self,
+        migration: &Migration,
+        sql: &str,
+        path: &str,
+        started: Instant,
+    ) -> Result<()> {
         // `revert.sql` is mutable for the same reason `verify.sql` is: it can
         // acquire a `COMMIT` long after the migration that owns it was reviewed
         // and deployed. A commit here would end the runner's transaction, so
@@ -393,6 +400,36 @@ impl Runner {
             .map_err(|error| script_failed(error, ScriptRole::Revert, path))?;
 
         registry::remove_applied(&transaction, &self.schema, migration.id).await?;
+
+        self.sequence += 1;
+        record_event(
+            &transaction,
+            &self.schema,
+            self.sequence,
+            self.run_id,
+            &self.facts,
+            &self.zapadka_version,
+            Event {
+                migration_id: Some(migration.id),
+                action: "revert",
+                outcome: "succeeded",
+                transaction_mode: Some("required"),
+                definition_sha256: Some(&migration.definition_sha256),
+                script_role: Some("revert"),
+                // The exact bytes reverted. `revert.sql` is mutable, so a past
+                // revert only means something alongside the script that ran.
+                script_sha256: Some(
+                    &migration
+                        .revert
+                        .as_ref()
+                        .map(|script| script.sha256.clone())
+                        .unwrap_or_default(),
+                ),
+                duration_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+                error: None,
+            },
+        )
+        .await?;
 
         transaction
             .commit()

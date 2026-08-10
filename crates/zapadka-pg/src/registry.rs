@@ -121,6 +121,13 @@ $$;
 CREATE TRIGGER events_append_only
     BEFORE UPDATE OR DELETE ON {schema}.events
     FOR EACH ROW EXECUTE FUNCTION {schema}.events_are_append_only();
+
+-- TRUNCATE is not an UPDATE or a DELETE, and the table's owner -- which is
+-- normally the deploying role -- can issue it. Without this, the whole history
+-- could be erased by a statement the row-level trigger never sees.
+CREATE TRIGGER events_no_truncate
+    BEFORE TRUNCATE ON {schema}.events
+    FOR EACH STATEMENT EXECUTE FUNCTION {schema}.events_are_append_only();
 "
     )
 }
@@ -516,6 +523,9 @@ mod tests {
     fn the_registry_declares_its_history_append_only() {
         let sql = initial_schema("\"zapadka\"");
         assert!(sql.contains("BEFORE UPDATE OR DELETE ON \"zapadka\".events"));
+        // TRUNCATE is not an UPDATE or a DELETE and needs its own trigger; the
+        // table owner can otherwise erase the entire history.
+        assert!(sql.contains("BEFORE TRUNCATE ON \"zapadka\".events"));
         assert!(sql.contains("append-only"));
     }
 
