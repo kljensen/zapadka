@@ -412,20 +412,22 @@ impl Runner {
             .await
             .map_err(|error| registry_failed(error, "begin the baseline transaction"))?;
 
+        // The applied rows and their events commit together. Recording the
+        // events afterwards would let a registry write failure leave migrations
+        // marked as baselined with no evidence in the append-only history --
+        // and the command would still report success.
         for migration in migrations {
             registry::record_applied(&transaction, &self.schema, self.run_id, migration).await?;
-        }
 
-        transaction
-            .commit()
-            .await
-            .map_err(|error| registry_failed(error, "commit the baseline"))?;
-
-        // Recorded after the commit, so an event never claims a baseline that
-        // did not happen.
-        for migration in migrations {
-            let _ = self
-                .record(Event {
+            self.sequence += 1;
+            record_event(
+                &transaction,
+                &self.schema,
+                self.sequence,
+                self.run_id,
+                &self.facts,
+                &self.zapadka_version,
+                Event {
                     migration_id: Some(migration.id),
                     action: "baseline",
                     outcome: "succeeded",
@@ -435,9 +437,15 @@ impl Runner {
                     script_sha256: None,
                     duration_ms: None,
                     error: None,
-                })
-                .await;
+                },
+            )
+            .await?;
         }
+
+        transaction
+            .commit()
+            .await
+            .map_err(|error| registry_failed(error, "commit the baseline"))?;
         Ok(())
     }
 

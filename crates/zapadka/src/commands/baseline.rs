@@ -65,7 +65,6 @@ pub async fn run(
         session,
         client,
         &opened.schema,
-        &opened.state,
         opened.timeouts,
         opened.facts,
     )
@@ -87,16 +86,23 @@ async fn baseline_under_lock(
     session: &mut Session,
     mut client: zapadka_pg::Client,
     schema: &str,
-    state: &zapadka_pg::RegistryState,
     timeouts: zapadka_pg::Timeouts,
     facts: zapadka_pg::ServerFacts,
 ) -> (zapadka_pg::Client, Result<()>) {
+    // Read again now the lock is held. Otherwise a concurrent revert could make
+    // a migration pending between the read and the decision, and this run would
+    // compute an empty closure and report success while recording nothing.
+    let state = match target::refresh_state(&client, config, schema).await {
+        Ok(state) => state,
+        Err(error) => return (client, Err(error)),
+    };
+
     if let Err(error) = registry::upgrade(
         &mut client,
         schema,
         config.config.project.id,
         crate::session::VERSION,
-        state,
+        &state,
     )
     .await
     {

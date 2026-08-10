@@ -34,12 +34,15 @@ pub async fn run(
     let opened = target::open(config, &args.target, session).await?;
     target::require_initialized(&opened.state, &opened.name)?;
 
-    let plan = history::plan(graph, &opened.state.applied)?;
-    let selected = select(graph, &plan.applied, &args.migrations)?;
-
     let wait = args
         .wait
         .unwrap_or(config.config.policy.advisory_lock_timeout);
+    let (schema, name, facts, timeouts) = (
+        opened.schema.clone(),
+        opened.name.clone(),
+        opened.facts,
+        opened.timeouts,
+    );
     let client = opened.connection.client;
 
     // Verification writes events, and an event written while a deploy is midway
@@ -47,20 +50,58 @@ pub async fn run(
     // the record coherent.
     let held = lock::acquire(&client, config.config.project.id, wait).await?;
 
-    let mut runner = Runner::new(
-        client,
-        opened.schema.clone(),
-        session.run_id,
-        opened.facts,
-        crate::session::VERSION.to_owned(),
-        opened.timeouts,
-    );
+    let (client, outcome) = verify_under_lock(
+        config, graph, args, session, client, &schema, &name, facts, timeouts,
+    )
+    .await;
 
-    let outcome = verify_all(&selected, graph, session, &mut runner).await;
-
-    let client = runner.into_client();
     let released = held.release(&client).await;
     outcome.and(released)
+}
+
+/// The body of a verify, with the lock held.
+///
+/// Selection happens here rather than before the lock: a concurrent revert
+/// could otherwise unapply a migration between the selection and the run, and
+/// this command would record a successful verification for a migration that is
+/// no longer applied.
+#[allow(clippy::too_many_arguments)]
+async fn verify_under_lock(
+    config: &LoadedConfig,
+    graph: &Graph,
+    args: &VerifyArgs,
+    session: &mut Session,
+    client: zapadka_pg::Client,
+    schema: &str,
+    name: &str,
+    facts: zapadka_pg::ServerFacts,
+    timeouts: zapadka_pg::Timeouts,
+) -> (zapadka_pg::Client, Result<()>) {
+    let state = match target::refresh_state(&client, config, schema).await {
+        Ok(state) => state,
+        Err(error) => return (client, Err(error)),
+    };
+    if let Err(error) = target::require_initialized(&state, name) {
+        return (client, Err(error));
+    }
+
+    let selected = match history::plan(graph, &state.applied)
+        .and_then(|plan| select(graph, &plan.applied, &args.migrations))
+    {
+        Ok(selected) => selected,
+        Err(error) => return (client, Err(error)),
+    };
+
+    let mut runner = Runner::new(
+        client,
+        schema.to_owned(),
+        session.run_id,
+        facts,
+        crate::session::VERSION.to_owned(),
+        timeouts,
+    );
+    let outcome = verify_all(&selected, graph, session, &mut runner).await;
+    (runner.into_client(), outcome)
 }
 
 /// Verifies each selected migration, stopping at the first failure.

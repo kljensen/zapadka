@@ -9,6 +9,17 @@
 //! Files run **serially**. Running them concurrently against one database would
 //! mean sharing a schema between tests that each assume they own it, which
 //! trades a real guarantee for a small amount of wall-clock time.
+//!
+//! # Sequences
+//!
+//! Rollback is not quite enough on its own. PostgreSQL deliberately does not
+//! roll back `nextval()`, so a test that inserts one row into a table with a
+//! generated key advances that sequence permanently — and a later file
+//! asserting on a generated id would then depend on which files ran before it.
+//!
+//! So each file's sequence values are captured before it runs and restored
+//! after it rolls back. Only sequences the file actually moved are written
+//! back, so the common case costs one query.
 
 use std::time::Instant;
 
@@ -78,6 +89,10 @@ async fn run_inner(
     // whole suite depends on.
     zapadka_core::lint::ensure_runner_owns_transaction(&file.sql, &file.relative_path)?;
 
+    // Captured before the file runs, because `nextval()` survives the rollback
+    // that undoes everything else.
+    let sequences = snapshot_sequences(client).await?;
+
     let transaction = client
         .transaction()
         .await
@@ -103,6 +118,10 @@ async fn run_inner(
         .await
         .map_err(|error| registry_failed(error, "roll back the test transaction"))?;
 
+    // Restored after the rollback, so the next file starts from the same state
+    // this one did.
+    restore_sequences(client, &sequences).await?;
+
     let messages = outcome.map_err(|error| sql_error(&error, file))?;
     let tap = collect_tap(&messages, file)?;
 
@@ -117,6 +136,89 @@ async fn run_inner(
              but pgTAP results",
         )
     })
+}
+
+/// One sequence's position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SequenceState {
+    /// Fully qualified and quoted, ready to pass to `setval`.
+    name: String,
+    last_value: i64,
+    is_called: bool,
+}
+
+/// Reads the position of every sequence a test could move.
+///
+/// System catalogs and Zapadka's own schemas are excluded: nothing in a test
+/// file should be touching those, and restoring them would be overreach.
+async fn snapshot_sequences(client: &Client) -> Result<Vec<SequenceState>> {
+    let rows = client
+        .query(
+            "SELECT format('%I.%I', schemaname, sequencename) \
+             FROM pg_sequences \
+             WHERE schemaname NOT IN ('pg_catalog', 'information_schema', $1, $2) \
+             ORDER BY 1",
+            &[&pgtap::TEST_SCHEMA, &"zapadka"],
+        )
+        .await
+        .map_err(|error| registry_failed(error, "list sequences"))?;
+
+    let mut states = Vec::with_capacity(rows.len());
+    for row in rows {
+        let name: String = row.get(0);
+        // `last_value` and `is_called` are not exposed by pg_sequences, so the
+        // sequence itself has to be read.
+        let Ok(state) = client
+            .query_one(&format!("SELECT last_value, is_called FROM {name}"), &[])
+            .await
+        else {
+            // A sequence the connecting role cannot read is one a test cannot
+            // move either, so there is nothing to restore.
+            continue;
+        };
+        states.push(SequenceState {
+            name,
+            last_value: state.get(0),
+            is_called: state.get(1),
+        });
+    }
+    Ok(states)
+}
+
+/// Puts back any sequence the test file moved.
+async fn restore_sequences(client: &Client, before: &[SequenceState]) -> Result<()> {
+    for state in before {
+        let Ok(row) = client
+            .query_one(
+                &format!("SELECT last_value, is_called FROM {}", state.name),
+                &[],
+            )
+            .await
+        else {
+            continue;
+        };
+        let now = SequenceState {
+            name: state.name.clone(),
+            last_value: row.get(0),
+            is_called: row.get(1),
+        };
+        if &now == state {
+            continue;
+        }
+        // Only the ones that actually moved, so an ordinary test file costs one
+        // query rather than one write per sequence in the database.
+        client
+            .execute(
+                &format!(
+                    "SELECT setval('{}', $1, $2)",
+                    state.name.replace('\'', "''")
+                ),
+                &[&state.last_value, &state.is_called],
+            )
+            .await
+            .map_err(|error| registry_failed(error, &format!("restore sequence {}", state.name)))?;
+    }
+    Ok(())
 }
 
 /// Turns a server error during a test file into a Zapadka error.

@@ -339,11 +339,10 @@ impl Parser {
 
     /// Reads `ok`/`not ok`, with an optional number, description, and directive.
     fn result_line(&mut self, trimmed: &str, line: usize) -> Result<(), TapError> {
-        let (passed, rest) = if let Some(rest) = trimmed.strip_prefix("not ok") {
-            (false, rest)
-        } else if let Some(rest) = trimmed.strip_prefix("ok") {
-            (true, rest)
-        } else {
+        // The keyword has to end at a token boundary. Matching a bare prefix
+        // would read `okay` as a passing assertion followed by `ay`, so a
+        // stray single-column result could turn a broken file green.
+        let Some((passed, rest)) = result_keyword(trimmed) else {
             return Err(TapError::at(
                 TapErrorKind::Unrecognized(trimmed.to_owned()),
                 line,
@@ -482,6 +481,27 @@ impl Directive {
             Self::Todo(reason) | Self::Skip(reason) => reason,
         }
     }
+}
+
+/// Splits `ok` or `not ok` from the rest of the line.
+///
+/// The keyword must be the whole token: followed by whitespace, a `#`, or the
+/// end of the line. TAP has no other terminator, and accepting a bare prefix is
+/// how `okay` becomes a passing assertion.
+fn result_keyword(trimmed: &str) -> Option<(bool, &str)> {
+    for (keyword, passed) in [("not ok", false), ("ok", true)] {
+        let Some(rest) = trimmed.strip_prefix(keyword) else {
+            continue;
+        };
+        let ends_token = rest
+            .chars()
+            .next()
+            .is_none_or(|c| c.is_whitespace() || c == '#');
+        if ends_token {
+            return Some((passed, rest));
+        }
+    }
+    None
 }
 
 /// Splits a leading assertion number from the rest of the line.
@@ -726,6 +746,28 @@ mod tests {
         // Flattening would merge a nested file's results into this one's count.
         let kind = err("1..1\n    ok 1 - inner\n    1..1\nok 1 - outer\n");
         assert!(matches!(kind, TapErrorKind::Unsupported(_)), "{kind:?}");
+    }
+
+    #[test]
+    fn a_word_merely_starting_with_ok_is_not_an_assertion() {
+        // `okay` read as a passing assertion is how a stray single-column
+        // result turns a broken file green.
+        for text in ["1..1\nokay\n", "1..1\nokey dokey\n", "1..1\nnot okay\n"] {
+            let kind = err(text);
+            assert!(
+                matches!(kind, TapErrorKind::Unrecognized(_)),
+                "{text:?}: {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_keyword_may_end_the_line_or_be_followed_by_a_directive() {
+        assert_eq!(ok("1..1\nok\n").assertions[0].outcome, Outcome::Passed);
+        assert_eq!(
+            ok("1..1\nok # SKIP nothing to do\n").assertions[0].outcome,
+            Outcome::Skipped
+        );
     }
 
     #[test]

@@ -1181,3 +1181,52 @@ fn a_successful_deploy_records_its_event_atomically() {
         "1"
     );
 }
+
+#[test]
+fn a_test_file_cannot_leak_sequence_state_to_the_next_one() {
+    // PostgreSQL does not roll back `nextval()`, so rollback alone would let a
+    // file that inserts one row permanently advance a generated key -- and a
+    // later file asserting on an id would then depend on run order.
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigserial PRIMARY KEY, note text);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    project.test_file(
+        "a-inserts.sql",
+        "SELECT plan(1);
+         INSERT INTO public.orders (note) VALUES ('first');
+         SELECT ok(true, 'inserted a row');
+         SELECT finish();",
+    );
+    // Runs second, and asserts it gets the same generated id the first file did.
+    project.test_file(
+        "b-expects-the-same-id.sql",
+        "SELECT plan(1);
+         WITH inserted AS (
+             INSERT INTO public.orders (note) VALUES ('second') RETURNING id
+         )
+         SELECT is(
+             (SELECT id FROM inserted),
+             1::bigint,
+             'the sequence was not advanced by the previous file');
+         SELECT finish();",
+    );
+
+    project
+        .report(&["test", "--uri", &db.uri()])
+        .assert_success();
+
+    // And the target itself is left where it started.
+    assert_eq!(
+        db.scalar("SELECT is_called FROM public.orders_id_seq"),
+        "f",
+        "the suite advanced a sequence on the target"
+    );
+}

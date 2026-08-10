@@ -183,9 +183,17 @@ fn from_service(settings: &service::ServiceSettings, name: &str) -> Result<PgCon
                 config.password(value);
             }
             "connect_timeout" => {
-                if let Ok(seconds) = value.parse::<u64>() {
-                    config.connect_timeout(std::time::Duration::from_secs(seconds));
-                }
+                // Refused rather than ignored. Silently dropping a malformed
+                // value turns a bounded connection attempt into an indefinite
+                // wait, which is the opposite of what the setting was for.
+                let seconds = value.parse::<u64>().map_err(|_| {
+                    Error::new(
+                        ErrorCode::TargetInvalid,
+                        format!("service {name:?} has an invalid connect_timeout {value:?}"),
+                    )
+                    .with_hint("connect_timeout is a whole number of seconds, as libpq defines it")
+                })?;
+                config.connect_timeout(std::time::Duration::from_secs(seconds));
             }
             "application_name" => {
                 config.application_name(value);
@@ -415,6 +423,23 @@ mod tests {
         let error = ssl_mode("verify_full", "s").unwrap_err();
         assert_eq!(error.code, ErrorCode::TargetInvalid);
         assert!(error.hint().unwrap().contains("verify-full"));
+    }
+
+    #[test]
+    fn a_malformed_connect_timeout_is_refused_rather_than_ignored() {
+        // `5s` is a natural thing to write and not what libpq accepts. Ignoring
+        // it would leave the connection with no timeout at all.
+        let mut settings = service::ServiceSettings::new();
+        settings.insert("connect_timeout".to_owned(), "5s".to_owned());
+        let error = from_service(&settings, "s").unwrap_err();
+        assert_eq!(error.code, ErrorCode::TargetInvalid);
+
+        settings.insert("connect_timeout".to_owned(), "5".to_owned());
+        let config = from_service(&settings, "s").unwrap();
+        assert_eq!(
+            config.get_connect_timeout(),
+            Some(&std::time::Duration::from_secs(5))
+        );
     }
 
     #[test]
