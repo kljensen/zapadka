@@ -210,6 +210,11 @@ The target is then **blocked**: every command that would act on it refuses,
 because a plan computed from applied state would be built on a gap. `status`
 still reports, since that is how you find out.
 
+A statement the server *rejected* blocks the target too. An error is not proof
+that nothing happened — a failed `CREATE INDEX CONCURRENTLY` leaves an invalid
+index behind, and an automatic retry would fail on the name that now exists,
+after you had been told the target was clean.
+
 Zapadka will not retry and will not guess. A `CREATE INDEX CONCURRENTLY` can
 finish after the client that asked for it is gone, and it can leave an invalid
 index behind — so both "assume it worked" and "assume it didn't" are wrong some

@@ -1659,7 +1659,7 @@ fn a_nontransactional_migration_deploys_and_records_its_attempt_first() {
 }
 
 #[test]
-fn a_nontransactional_statement_the_server_refuses_is_not_left_blocking() {
+fn a_nontransactional_statement_the_server_refuses_still_blocks_the_target() {
     let db = database();
     let project = project();
     project.nontransactional_migration(
@@ -1671,15 +1671,39 @@ fn a_nontransactional_statement_the_server_refuses_is_not_left_blocking() {
     let report = project.report(&["deploy", "--uri", &db.uri()]);
     report.assert_failed("deploy.failed", 9);
 
-    // The server answered, so the outcome is known: nothing ran. Leaving the
-    // target blocked would demand a resolution for a question with one answer.
+    // An error from the server is not proof that nothing happened. A failed
+    // CREATE INDEX CONCURRENTLY leaves an invalid index behind, and an
+    // automatic retry would then fail on a name that already exists -- after
+    // the operator had been told the target was clean. So the attempt survives
+    // and a person decides.
+    assert_eq!(
+        db.scalar("SELECT count(*) FROM zapadka.nontransactional_attempts"),
+        "1"
+    );
+    let status = project.report(&["status", "--uri", &db.uri()]);
+    status.assert_success();
+    assert!(status.diagnostic_codes().contains(&"target.blocked"));
+
+    // And it is recoverable without ceremony once they have looked.
+    project
+        .report(&["resolve", "bad-index", "--not-applied", "--uri", &db.uri()])
+        .assert_success();
     assert_eq!(
         db.scalar("SELECT count(*) FROM zapadka.nontransactional_attempts"),
         "0"
     );
-    let report = project.report(&["status", "--uri", &db.uri()]);
-    report.assert_success();
-    assert!(!report.diagnostic_codes().contains(&"target.blocked"));
+}
+
+#[test]
+fn a_nontransactional_migration_that_would_release_the_lock_is_rejected() {
+    let project = project();
+    // DISCARD ALL is implemented partly as pg_advisory_unlock_all(), and the
+    // deployment lock is session-scoped: running it would hand the lock back
+    // mid-deploy and let a second run start alongside this one.
+    project.nontransactional_migration("discard", &[], "DISCARD ALL;");
+
+    let report = project.report(&["lint"]);
+    report.assert_failed("execution.mode_unsupported", 4);
 }
 
 #[test]

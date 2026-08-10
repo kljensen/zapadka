@@ -292,13 +292,21 @@ impl Runner {
                     duration_ms,
                 })
             }
-            // The server answered. Whatever it refused, it refused completely:
-            // the statement is not applied, and the attempt can be cleared so a
-            // corrected migration can be deployed without ceremony.
+            // The attempt row stays on every failure, and the target stays
+            // blocked until a person has looked.
+            //
+            // Clearing it when the server answered is tempting, on the grounds
+            // that a rejected statement did nothing. That is false for exactly
+            // the statements this mode exists for: a failed
+            // `CREATE INDEX CONCURRENTLY` leaves an invalid index behind, and
+            // the automatic retry a cleared attempt would permit usually fails
+            // again on the name that now exists -- after the operator has been
+            // told the target was fine. Whether to drop that index is a
+            // decision about destroying an object, which is theirs.
             Err(error) if error.as_db_error().is_some() => {
                 let failure = script_failed(error, ScriptRole::Deploy, &path);
-                self.abandon_attempt(migration, duration_ms, &failure).await;
-                Err(failure)
+                self.record_failure(migration, duration_ms, &failure).await;
+                Err(blocked_by(failure, migration))
             }
             // The server did not answer: a dropped connection, a killed backend,
             // a timeout on the client side. The statement may have completed
@@ -485,13 +493,12 @@ impl Runner {
             .map_err(|error| registry_failed(error, "commit the applied state"))
     }
 
-    /// Clears the attempt for a statement the server refused.
+    /// Records that a nontransactional statement was refused.
     ///
-    /// Best-effort by design: the deploy failure is what the operator needs to
-    /// see, and a second failure while tidying up must not replace it. A
-    /// surviving attempt row is the safe direction to fail in — it blocks, and
-    /// blocking is recoverable.
-    async fn abandon_attempt(&mut self, migration: &Migration, duration_ms: u64, failure: &Error) {
+    /// The attempt row is deliberately left in place. Best-effort by design:
+    /// the deploy failure is what the operator needs to see, and a second
+    /// failure while writing the event must not replace it.
+    async fn record_failure(&mut self, migration: &Migration, duration_ms: u64, failure: &Error) {
         let _ = self
             .record(Event {
                 migration_id: Some(migration.id),
@@ -505,13 +512,6 @@ impl Runner {
                 error: Some(failure),
             })
             .await;
-
-        if let Ok(transaction) = self.client.transaction().await {
-            let cleared = registry::clear_attempt(&transaction, &self.schema, migration.id).await;
-            if cleared.is_ok() {
-                let _ = transaction.commit().await;
-            }
-        }
     }
 
     /// Builds the error for a statement whose outcome nobody observed.
@@ -1032,6 +1032,22 @@ struct Event<'a> {
 ///
 /// `SET LOCAL` so they last exactly as long as the transaction Zapadka opened
 /// and cannot leak into the next one.
+/// Adds the consequence to a failed nontransactional deploy.
+///
+/// The failure the operator reads and the state the target is left in are two
+/// different facts, and reporting only the first would leave them to discover
+/// the second from whatever they ran next.
+fn blocked_by(failure: Error, migration: &Migration) -> Error {
+    let hint = format!(
+        "the target is now blocked. A nontransactional statement can fail after doing part of its \
+         work -- a failed CREATE INDEX CONCURRENTLY leaves an invalid index -- so Zapadka will not \
+         decide on its own that nothing happened. Check the database, clean up anything left \
+         behind, then run `zapadka resolve {} --not-applied`.",
+        zapadka_core::migration::short_id(migration.id)
+    );
+    failure.with_hint(hint)
+}
+
 pub(crate) async fn apply_timeouts(
     transaction: &PgTransaction<'_>,
     timeouts: Timeouts,

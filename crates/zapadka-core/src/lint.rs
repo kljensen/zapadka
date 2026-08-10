@@ -393,6 +393,26 @@ fn check_execution_mode(
             // and the error would look identical while the work was durable --
             // so the next deploy would run it again.
             if let [statement] = parsed.statements.as_slice()
+                && let Some(construct) = statement.kind.breaks_runner_session()
+            {
+                findings.errors.push(
+                    Error::new(
+                        ErrorCode::ExecutionModeUnsupported,
+                        format!(
+                            "{} runs {construct}, which would release Zapadka's deployment lock",
+                            migration.relative_dir
+                        ),
+                    )
+                    .at(Location::file(&script.relative_path))
+                    .with_hint(
+                        "the deployment lock is session-scoped, and DISCARD ALL unlocks every \
+                         advisory lock the session holds. A second deploy could then start while \
+                         this one was still running.",
+                    ),
+                );
+            }
+
+            if let [statement] = parsed.statements.as_slice()
                 && statement.kind.forbidden_in_transaction().is_none()
             {
                 findings.errors.push(
