@@ -158,8 +158,14 @@ async fn run_suite(
         )?;
         let mut connection = zapadka_pg::connect(&resolved).await?;
 
-        let outcome =
-            testrun::run_file(&mut connection.client, file, application_schemas, timeouts).await;
+        let outcome = testrun::run_file(
+            &mut connection.client,
+            file,
+            application_schemas,
+            schema,
+            timeouts,
+        )
+        .await;
         if !outcome.passed() {
             failures += 1;
         }

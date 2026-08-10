@@ -265,12 +265,29 @@ pub async fn find_owning_project(client: &Client) -> Result<Option<(String, Uuid
         let schema: String = row.get(0);
         let quoted = quote_identifier(&schema);
 
-        // A table Zapadka cannot read, or whose `project_id` is not a UUID, is
-        // something else that happens to share the column names.
-        let Ok(Some(meta)) = client
+        // A table whose `project_id` is not a UUID is something else that
+        // happens to share the column names. A table Zapadka cannot *read* is
+        // different: two projects using roles without access to each other's
+        // schemas would each dismiss the other's registry and both claim the
+        // database. That has to fail closed.
+        let meta = match client
             .query_opt(&format!("SELECT project_id FROM {quoted}.meta"), &[])
             .await
-        else {
+        {
+            Ok(meta) => meta,
+            Err(error) => {
+                return Err(registry_failed(
+                    error,
+                    &format!("read the registry-shaped table in schema {schema}"),
+                )
+                .with_hint(
+                    "Zapadka found a table that looks like another project's registry and could \
+                     not read it. It will not claim a database it cannot prove is unowned; grant \
+                     the connecting role SELECT on it, or use a database of your own.",
+                ));
+            }
+        };
+        let Some(meta) = meta else {
             continue;
         };
         let Ok(project_id) = meta.try_get::<_, Uuid>(0) else {

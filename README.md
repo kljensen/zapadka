@@ -148,7 +148,7 @@ Scripts branch on these; they are a stable contract.
 |---|---|
 | 0 | Success |
 | 2 | Bad command line |
-| 3 | Project or configuration unusable |
+| 3 | Project, configuration, or filesystem unusable |
 | 4 | Migration content, graph, or SQL is invalid |
 | 5 | Deployed history and the checked-out project disagree |
 | 6 | Another Zapadka run holds the deployment lock |

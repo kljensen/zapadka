@@ -1494,3 +1494,26 @@ fn the_registry_can_be_created_in_a_schema_that_already_exists() {
         "1"
     );
 }
+
+#[test]
+fn an_empty_verification_script_is_refused_rather_than_reported_as_verified() {
+    // A `verify.sql` that runs nothing would be recorded as a successful
+    // verification -- the report and the registry would both claim a check
+    // happened when none did.
+    let db = database();
+    let project = project();
+    project.migration_with(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint PRIMARY KEY);",
+        None,
+        Some("-- TODO: write the check\n"),
+    );
+
+    let report = project.report(&["deploy", "--uri", &db.uri()]);
+    report.assert_failed("script.empty", exit::VALIDATION);
+    assert_eq!(
+        db.scalar("SELECT count(*) FROM pg_namespace WHERE nspname = 'zapadka'"),
+        "0"
+    );
+}

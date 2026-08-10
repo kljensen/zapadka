@@ -210,8 +210,30 @@ fn check_script(
     findings: &mut Findings,
 ) {
     if script.runs_nothing() {
-        // Not an error: an empty `verify.sql` is odd but harmless, and an empty
-        // `deploy.sql` may be a placeholder that a later commit fills in.
+        // A `verify.sql` that runs nothing is a different matter from an empty
+        // deploy script. Its presence is what makes Zapadka verify a migration
+        // at all, so a no-op one is reported as a successful verification --
+        // the report and the registry both claim a check happened when none
+        // did. That is a false green, and false greens are the one thing a
+        // verification mechanism must not produce.
+        if script.role == ScriptRole::Verify {
+            findings.errors.push(
+                Error::new(
+                    ErrorCode::ScriptEmpty,
+                    format!("{} runs no statements", script.relative_path),
+                )
+                .at(Location::file(&script.relative_path))
+                .with_hint(
+                    "a verification script that does nothing would be recorded as a successful \
+                     verification; write the check, or delete the file to make this migration \
+                     unverified",
+                ),
+            );
+            return;
+        }
+
+        // An empty `deploy.sql` may be a placeholder a later commit fills in,
+        // so it is only a warning.
         findings.diagnostics.push(warn(
             migration,
             script,

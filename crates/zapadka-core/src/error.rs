@@ -174,7 +174,12 @@ impl ErrorCode {
             | Self::TargetUnknown
             | Self::TargetInvalid
             | Self::AlreadyExists
-            | Self::SelectorMatchedNothing => ExitCode::Project,
+            | Self::SelectorMatchedNothing
+            // A file Zapadka cannot read is a problem with the project or the
+            // environment, not a defect in Zapadka. Exit 70 is documented as
+            // "a bug in Zapadka", and automation that pages on it should not be
+            // woken by a full disk.
+            | Self::Io => ExitCode::Project,
 
             Self::ManifestInvalid
             | Self::ManifestUnsupportedFormatVersion
@@ -208,7 +213,7 @@ impl ErrorCode {
 
             Self::DeployFailed | Self::VerifyFailed | Self::RevertFailed => ExitCode::Execution,
 
-            Self::Io | Self::Internal => ExitCode::Internal,
+            Self::Internal => ExitCode::Internal,
         }
     }
 }

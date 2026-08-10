@@ -68,11 +68,20 @@ pub async fn run_file(
     client: &mut Client,
     file: &TestFile,
     application_schemas: &[String],
+    registry_schema: &str,
     timeouts: Timeouts,
 ) -> TestOutcome {
     let started = Instant::now();
     let mut advanced = Vec::new();
-    let result = run_inner(client, file, application_schemas, timeouts, &mut advanced).await;
+    let result = run_inner(
+        client,
+        file,
+        application_schemas,
+        registry_schema,
+        timeouts,
+        &mut advanced,
+    )
+    .await;
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     match result {
@@ -96,6 +105,7 @@ async fn run_inner(
     client: &mut Client,
     file: &TestFile,
     application_schemas: &[String],
+    registry_schema: &str,
     timeouts: Timeouts,
     advanced: &mut Vec<AdvancedSequence>,
 ) -> Result<TapDocument> {
@@ -107,7 +117,7 @@ async fn run_inner(
 
     // Captured before the file runs, because `nextval()` survives the rollback
     // that undoes everything else.
-    let sequences = snapshot_sequences(client).await?;
+    let sequences = snapshot_sequences(client, registry_schema).await?;
 
     let transaction = client
         .transaction()
@@ -180,9 +190,11 @@ pub struct AdvancedSequence {
 
 /// Reads the position of every sequence a test could move.
 ///
-/// System catalogs and Zapadka's own schemas are excluded: nothing in a test
-/// file should be touching those.
-async fn snapshot_sequences(client: &Client) -> Result<Vec<SequenceState>> {
+/// System catalogs and Zapadka's own schemas are excluded. The registry schema
+/// is passed in rather than assumed: it is configurable, so hard-coding the
+/// default would skip an application schema that happens to be called
+/// `zapadka` while scanning the registry that is actually somewhere else.
+async fn snapshot_sequences(client: &Client, registry_schema: &str) -> Result<Vec<SequenceState>> {
     // Restricted to sequences the role can actually advance. A database can
     // contain sequences belonging to other applications that this role cannot
     // touch; requiring SELECT on those would fail the suite before a single
@@ -195,7 +207,7 @@ async fn snapshot_sequences(client: &Client) -> Result<Vec<SequenceState>> {
                AND has_sequence_privilege( \
                      format('%I.%I', schemaname, sequencename), 'USAGE,UPDATE') \
              ORDER BY 1",
-            &[&pgtap::TEST_SCHEMA, &"zapadka"],
+            &[&pgtap::TEST_SCHEMA, &registry_schema],
         )
         .await
         .map_err(|error| registry_failed(error, "list sequences"))?;
