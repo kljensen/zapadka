@@ -19,7 +19,7 @@ use zapadka_core::config::LoadedConfig;
 use zapadka_core::error::{Error, Result};
 use zapadka_core::graph::Graph;
 use zapadka_core::migration::Migration;
-use zapadka_core::report::{Action, MigrationResult, Script, Status};
+use zapadka_core::report::{Action, MigrationResult, Script, ScriptRole, Status};
 use zapadka_pg::execute::Runner;
 use zapadka_pg::history;
 use zapadka_pg::{ScriptOutcome, lock, registry};
@@ -36,12 +36,15 @@ pub async fn run(
     session: &mut Session,
 ) -> Result<()> {
     // Local validation first, so an invalid project never reaches a database.
-    let findings =
-        crate::commands::lint::analyze(graph, &config.config.policy, crate::commands::CAPABILITIES);
-    session.diagnose_all(findings.diagnostics.clone());
-    if let Some(error) = findings.first_error() {
-        return Err(error.clone());
-    }
+    // The same call `lint` makes, including the warning about a `policy.deny`
+    // entry that names no rule — a typo there means the safeguard someone added
+    // is not running, which matters most on the deploy path.
+    crate::commands::lint::validate(
+        graph,
+        &config.config.policy,
+        crate::commands::CAPABILITIES,
+        session,
+    )?;
 
     let opened = target::open(config, &args.target, session).await?;
     let project_id = config.config.project.id;
@@ -167,54 +170,87 @@ async fn apply_all(
             continue;
         }
 
-        match runner.deploy(migration).await {
-            Ok(deployed) => {
-                let mut result = result_of(migration, Action::Deploy, Status::Succeeded);
-                result.duration_ms = Some(deployed.duration_ms);
-                result.scripts.push(script_of(&deployed, Status::Succeeded));
-
-                if args.should_verify() {
-                    // Verification runs after the commit, so it observes
-                    // exactly what a later reader would see.
-                    match runner.verify(migration).await {
-                        Ok(Some(verified)) => {
-                            result.scripts.push(script_of(&verified, Status::Succeeded));
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            // The migration stays applied. It committed, and
-                            // pretending otherwise would make the report lie.
-                            result.status = Status::Succeeded;
-                            result.error = Some((&error).into());
-                            session.migrations.push(result);
-                            failure = Some(error);
-                            continue;
-                        }
-                    }
-                }
-
-                session.migrations.push(result);
-            }
-            Err(error) => {
-                let mut result = result_of(migration, Action::Deploy, Status::Failed);
-                result.error = Some((&error).into());
-                result.scripts.push(Script {
-                    role: zapadka_core::report::ScriptRole::Deploy,
-                    path: migration.deploy.relative_path.clone(),
-                    sha256: migration.deploy.sha256.clone(),
-                    status: Status::Failed,
-                    duration_ms: None,
-                    error: Some((&error).into()),
-                });
-                session.migrations.push(result);
-                failure = Some(error);
-            }
-        }
+        let (result, error) = apply_one(migration, args, runner).await;
+        session.migrations.push(result);
+        failure = error;
     }
 
     match failure {
         Some(error) => Err(error),
         None => Ok(()),
+    }
+}
+
+/// Applies one migration and verifies it, returning what to report.
+///
+/// Returns the error separately from the report entry because the two do not
+/// always agree: a failed verification leaves a *succeeded* migration and still
+/// stops the run.
+async fn apply_one(
+    migration: &Migration,
+    args: &DeployArgs,
+    runner: &mut Runner,
+) -> (MigrationResult, Option<Error>) {
+    let deployed = match runner.deploy(migration).await {
+        Ok(deployed) => deployed,
+        Err(error) => {
+            let mut result = result_of(migration, Action::Deploy, Status::Failed);
+            result.scripts.push(failed_script(
+                ScriptRole::Deploy,
+                &migration.deploy.relative_path,
+                &migration.deploy.sha256,
+                &error,
+            ));
+            result.error = Some((&error).into());
+            return (result, Some(error));
+        }
+    };
+
+    let mut result = result_of(migration, Action::Deploy, Status::Succeeded);
+    result.duration_ms = Some(deployed.duration_ms);
+    result.scripts.push(script_of(&deployed, Status::Succeeded));
+
+    if !args.should_verify() {
+        return (result, None);
+    }
+
+    // Verification runs after the commit, so it observes exactly what a later
+    // reader would see.
+    match runner.verify(migration).await {
+        Ok(Some(verified)) => {
+            result.scripts.push(script_of(&verified, Status::Succeeded));
+            (result, None)
+        }
+        // No verify.sql. Not a failure: verification is opt-in per migration.
+        Ok(None) => (result, None),
+        Err(error) => {
+            // The migration stays applied. It committed, and pretending
+            // otherwise would make the report lie. The script that failed is
+            // named with its hash, because `verify.sql` is mutable and the
+            // migration id does not identify the bytes that ran.
+            if let Some(script) = &migration.verify {
+                result.scripts.push(failed_script(
+                    ScriptRole::Verify,
+                    &script.relative_path,
+                    &script.sha256,
+                    &error,
+                ));
+            }
+            result.error = Some((&error).into());
+            (result, Some(error))
+        }
+    }
+}
+
+/// The report entry for a script that ran and failed.
+fn failed_script(role: ScriptRole, path: &str, sha256: &str, error: &Error) -> Script {
+    Script {
+        role,
+        path: path.to_owned(),
+        sha256: sha256.to_owned(),
+        status: Status::Failed,
+        duration_ms: None,
+        error: Some(error.into()),
     }
 }
 

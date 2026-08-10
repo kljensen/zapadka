@@ -24,7 +24,15 @@ use zapadka_core::report::ReportV1;
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let report = run(&cli);
-    emit(&report, cli.output, cli.quiet);
+
+    // A report that could not be written is not a successful run. In JSON mode
+    // a truncated document with a zero exit would break the promise the whole
+    // contract rests on: exactly one document, and an exit code that agrees
+    // with it.
+    if let Err(error) = emit(&report, cli.output, cli.quiet) {
+        let _ = writeln!(std::io::stderr(), "error: cannot write the report: {error}");
+        return std::process::ExitCode::from(ExitCode::Internal.code_u8());
+    }
     // The exit code always comes from the report, so a nonzero exit and a
     // `"outcome": "failure"` can never disagree. Every code Zapadka defines
     // fits in a u8; anything else would be a bug, and reporting it as an
@@ -137,31 +145,29 @@ fn working_directory(cli: &Cli) -> Result<Utf8PathBuf> {
 /// output can be piped straight into a parser. In human mode stdout carries the
 /// summary. Either way, progress and warnings that are not part of the result
 /// go to stderr.
-fn emit(report: &ReportV1, format: OutputFormat, quiet: bool) {
+fn emit(report: &ReportV1, format: OutputFormat, quiet: bool) -> std::io::Result<()> {
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
 
     match format {
-        OutputFormat::Json => {
-            let _ = stdout.write_all(report.to_json().as_bytes());
-        }
-        OutputFormat::Human if !quiet => {
-            let _ = human::render(report, &mut stdout);
-        }
+        OutputFormat::Json => stdout.write_all(report.to_json().as_bytes())?,
+        OutputFormat::Human if !quiet => human::render(report, &mut stdout)?,
         OutputFormat::Human => {
             // Even when quiet, a failure must say something: a silent nonzero
             // exit is the hardest kind of failure to diagnose.
             if let Some(error) = &report.error {
-                let _ = writeln!(
+                writeln!(
                     std::io::stderr(),
                     "error: {} [{}]",
                     error.message,
                     error.code
-                );
+                )?;
             }
         }
     }
-    let _ = stdout.flush();
+    // Flushed explicitly, because a buffered write that failed on drop would be
+    // discarded and the run would still exit zero.
+    stdout.flush()
 }
 
 /// Whether stderr is a terminal.

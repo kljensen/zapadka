@@ -1320,3 +1320,83 @@ fn the_report_names_the_database_the_server_says_it_is_connected_to() {
         "the report should name the database actually connected to"
     );
 }
+
+#[test]
+fn baseline_refuses_a_migration_a_later_deploy_could_not_accept() {
+    // Recording a migration that fails lint would wedge the project: it is
+    // applied, so it cannot be edited without a history mismatch, and every
+    // later deploy fails on it.
+    let db = database();
+    let project = project();
+    project.migration("bad", &[], "CREATE TABLE t (i int);\nCOMMIT;");
+
+    let report = project.report(&[
+        "baseline",
+        "--uri",
+        &db.uri(),
+        "--to",
+        "bad",
+        "--acknowledge-existing-schema",
+    ]);
+    report.assert_failed("script.transaction_control", exit::VALIDATION);
+    assert_eq!(
+        db.scalar("SELECT count(*) FROM pg_namespace WHERE nspname = 'zapadka'"),
+        "0",
+        "nothing should have been recorded"
+    );
+}
+
+#[test]
+fn deploy_reports_a_policy_denial_that_names_no_rule() {
+    // A typo in policy.deny means the safeguard someone added is not running.
+    // That matters most on the deploy path, which is where it was silent.
+    let db = database();
+    let project = project();
+    let config = project.root().join("zapadka.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        text.replace("[policy]", "[policy]\ndeny = [\"lint.destrutive\"]"),
+    )
+    .unwrap();
+    project.migration("first", &[], "CREATE TABLE public.a (i int);");
+
+    let report = project.report(&["deploy", "--uri", &db.uri()]);
+    report.assert_success();
+    assert!(
+        report.diagnostic_codes().contains(&"policy.unknown_lint"),
+        "{:?}",
+        report.diagnostic_codes()
+    );
+}
+
+#[test]
+fn a_failed_post_deploy_verification_names_the_script_that_failed() {
+    let db = database();
+    let project = project();
+    project.migration_with(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint PRIMARY KEY);",
+        None,
+        Some("SELECT 1 / 0;"),
+    );
+
+    let report = project.report(&["deploy", "--uri", &db.uri()]);
+    report.assert_failed("verify.failed", exit::EXECUTION);
+
+    // `verify.sql` is mutable, so the report has to say which bytes ran.
+    let scripts = report.migrations()[0]["scripts"].as_array().unwrap();
+    let verify = scripts
+        .iter()
+        .find(|script| script["role"] == "verify")
+        .expect("the failed verification script should be in the report");
+    assert_eq!(verify["status"], "failed");
+    assert_eq!(verify["sha256"].as_str().unwrap_or_default().len(), 64);
+    assert!(
+        verify["path"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("verify.sql")
+    );
+}

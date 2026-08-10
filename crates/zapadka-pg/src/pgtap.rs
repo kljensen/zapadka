@@ -131,13 +131,30 @@ pub async fn installed(client: &Client) -> Result<Installation> {
     }
 
     let quoted = quote_identifier(TEST_SCHEMA);
-    let marker = client
+    let marker = match client
         .query_opt(
             &format!("SELECT artifact_sha256, pgtap_version FROM {quoted}.zapadka_pgtap"),
             &[],
         )
         .await
-        .unwrap_or(None);
+    {
+        Ok(marker) => marker,
+        // Only a missing table means "Zapadka did not create this schema".
+        // Treating a permission error or a dropped connection the same way
+        // would tell someone to rename their schema when the real problem was
+        // that Zapadka could not read it.
+        Err(error)
+            if error
+                .as_db_error()
+                .map(tokio_postgres::error::DbError::code)
+                == Some(&tokio_postgres::error::SqlState::UNDEFINED_TABLE) =>
+        {
+            None
+        }
+        Err(error) => {
+            return Err(registry_failed(error, "read the pgTAP installation marker"));
+        }
+    };
 
     match marker {
         Some(row) => {

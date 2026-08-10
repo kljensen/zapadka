@@ -14,14 +14,7 @@ use crate::session::Session;
 
 /// Runs `zapadka lint`.
 pub fn run(graph: &Graph, policy: &Policy, session: &mut Session) -> Result<()> {
-    let findings = analyze(graph, policy, crate::commands::CAPABILITIES);
-    session.diagnose_all(findings.diagnostics.clone());
-    report_unknown_denials(policy, session);
-
-    match findings.first_error() {
-        Some(error) => Err(error.clone()),
-        None => Ok(()),
-    }
+    validate(graph, policy, crate::commands::CAPABILITIES, session)
 }
 
 /// Lints the graph and applies project policy.
@@ -34,6 +27,29 @@ pub fn analyze(graph: &Graph, policy: &Policy, capabilities: Capabilities) -> Fi
     let mut findings = check(&migrations, policy, capabilities);
     apply_policy(&mut findings);
     findings
+}
+
+/// Runs the shared validation and records everything it found.
+///
+/// Used by `lint`, `deploy`, and `baseline` so all three reach the same
+/// verdict. A project that lints clean and then fails at deploy time would make
+/// `lint` worthless; a project that `baseline` accepts and `deploy` then
+/// rejects is worse, because the migration is already recorded as applied and
+/// cannot be edited without a history mismatch.
+pub fn validate(
+    graph: &Graph,
+    policy: &Policy,
+    capabilities: Capabilities,
+    session: &mut Session,
+) -> Result<()> {
+    let findings = analyze(graph, policy, capabilities);
+    session.diagnose_all(findings.diagnostics.clone());
+    report_unknown_denials(policy, session);
+
+    match findings.first_error() {
+        Some(error) => Err(error.clone()),
+        None => Ok(()),
+    }
 }
 
 /// Warns about `policy.deny` entries that name no real rule.

@@ -47,6 +47,17 @@ pub async fn run(
         ));
     }
 
+    // Validated exactly as a deploy would be. Recording a migration that a
+    // later deploy will refuse to lint would wedge the project: the migration
+    // is applied, so it cannot be edited without a history mismatch, and every
+    // subsequent deploy fails on it.
+    crate::commands::lint::validate(
+        graph,
+        &config.config.policy,
+        crate::commands::CAPABILITIES,
+        session,
+    )?;
+
     let target_migration = resolve(graph, &args.to)?;
     let opened = target::open(config, &args.target, session).await?;
 
