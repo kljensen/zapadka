@@ -101,6 +101,16 @@ pub enum ErrorCode {
     VerifyFailed,
     /// A `revert.sql` failed.
     RevertFailed,
+    /// A nontransactional statement's outcome was never observed.
+    ///
+    /// Distinct from `DeployFailed`, which means the server said no. This one
+    /// means nobody knows, and the difference decides what an operator does
+    /// next.
+    DeployOutcomeUnknown,
+    /// An unresolved nontransactional attempt is blocking the target.
+    RegistryBlocked,
+    /// `resolve` was asked about a migration with nothing to resolve.
+    NothingToResolve,
 
     // -- Local project mutation -------------------------------------------
     /// `init` or `new` would overwrite something that already exists.
@@ -154,6 +164,9 @@ impl ErrorCode {
             Self::DeployFailed => "deploy.failed",
             Self::VerifyFailed => "verify.failed",
             Self::RevertFailed => "revert.failed",
+            Self::DeployOutcomeUnknown => "deploy.outcome_unknown",
+            Self::RegistryBlocked => "registry.blocked",
+            Self::NothingToResolve => "resolve.nothing_to_resolve",
             Self::AlreadyExists => "project.already_exists",
             Self::SelectorMatchedNothing => "selector.matched_nothing",
             Self::LintFailed => "lint.failed",
@@ -205,13 +218,24 @@ impl ErrorCode {
             Self::RegistryFormatTooNew
             | Self::RegistryProjectMismatch
             | Self::RegistryNotInitialized
-            | Self::RegistryUpgradeFailed => ExitCode::Registry,
+            | Self::RegistryUpgradeFailed
+            // A blocked target and a pointless `resolve` are both states of
+            // the registry, and both are fixed by acting on the registry.
+            | Self::RegistryBlocked
+            | Self::NothingToResolve => ExitCode::Registry,
 
             Self::LockUnavailable => ExitCode::Lock,
 
             Self::ConnectionFailed | Self::ServerUnsupported => ExitCode::Target,
 
-            Self::DeployFailed | Self::VerifyFailed | Self::RevertFailed => ExitCode::Execution,
+            // `DeployOutcomeUnknown` shares this deliberately. An unknown
+            // outcome is a failed run from automation's point of view; what
+            // makes it different is what a person has to do next, and that is
+            // carried by `error.code` rather than by a number CI branches on.
+            Self::DeployFailed
+            | Self::VerifyFailed
+            | Self::RevertFailed
+            | Self::DeployOutcomeUnknown => ExitCode::Execution,
 
             Self::Internal => ExitCode::Internal,
         }

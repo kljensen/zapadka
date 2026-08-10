@@ -82,6 +82,10 @@ async fn revert_under_lock(
     if let Err(error) = target::require_initialized(&state, name) {
         return (client, Err(error));
     }
+    // Nothing may act on a target whose applied state has an unresolved gap.
+    if let Err(error) = target::require_not_blocked(&state, name) {
+        return (client, Err(error));
+    }
 
     // History integrity first: reverting a migration whose source has been
     // edited would run a revert script that does not match what was deployed.
@@ -268,6 +272,7 @@ mod tests {
             format_version: Some(1),
             project_id: None,
             applied: map,
+            unresolved: BTreeMap::new(),
         }
     }
 

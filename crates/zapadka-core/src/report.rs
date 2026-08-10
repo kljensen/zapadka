@@ -172,6 +172,9 @@ pub enum Action {
     Revert,
     /// Recorded the migration as applied without running its SQL.
     Baseline,
+    /// Recorded an operator's account of an interrupted nontransactional
+    /// statement, rather than something Zapadka observed.
+    Resolve,
 }
 
 /// The outcome of one migration's action.
@@ -188,8 +191,10 @@ pub enum Status {
     Failed,
     /// Selected but deliberately not run, e.g. after an earlier failure.
     Skipped,
-    /// Applied, but its outcome on the server is unknown and must be resolved
-    /// by an operator before deployment can continue.
+    /// Started outside a transaction and never resolved: whether it took
+    /// effect is unknown, and an operator must say which before deployment can
+    /// continue. Deliberately neither `Applied` nor `Pending`, because it is
+    /// the absence of that answer that the status exists to report.
     Blocked,
 }
 

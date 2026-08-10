@@ -235,6 +235,333 @@ impl Runner {
         Ok(())
     }
 
+    /// Applies one migration that cannot run inside a transaction.
+    ///
+    /// `CREATE INDEX CONCURRENTLY` and its relatives refuse to run in a
+    /// transaction block, so the guarantee the transactional path relies on —
+    /// SQL and record committing together — is unavailable here. Nothing can
+    /// recover it. What replaces it is ordering:
+    ///
+    /// 1. Write down the attempt and commit it.
+    /// 2. Run the statement.
+    /// 3. Record the outcome and clear the attempt.
+    ///
+    /// An interruption anywhere in step 2 leaves the row from step 1 behind.
+    /// The next run finds it, refuses to continue, and names the statement
+    /// whose fate is unknown. That is worse than a transaction and better than
+    /// the alternative, which is a database nobody can describe.
+    ///
+    /// Zapadka never retries on its own. `CREATE INDEX CONCURRENTLY` that was
+    /// interrupted leaves an invalid index behind; re-running it blindly can
+    /// fail on a name that already exists, and cleaning up first is a decision
+    /// with data-loss potential. Only a person can look and say what happened.
+    pub async fn deploy_nontransactional(
+        &mut self,
+        migration: &Migration,
+    ) -> Result<ScriptOutcome> {
+        let started = Instant::now();
+        let path = migration.deploy.relative_path.clone();
+
+        // The target's limits still apply, but they have to be set on the
+        // session: `SET LOCAL` needs a transaction, which is the one thing this
+        // statement cannot have. They are left set afterwards only for as long
+        // as this connection lives, and it is Zapadka's own.
+        //
+        // Before the attempt is recorded, not after. A rejected `SET` -- a
+        // duration PostgreSQL's GUC range will not take, say -- would otherwise
+        // leave a committed attempt for a statement that never ran, and block
+        // the target until someone resolved a question with no substance.
+        self.apply_session_timeouts().await?;
+
+        // Step 1, committed on its own. If this fails, nothing has run, and the
+        // failure is an ordinary one.
+        self.record_attempt(migration).await?;
+
+        // Step 2, outside any transaction. `batch_execute` on the client itself
+        // runs in autocommit, which is what the statement requires.
+        let outcome = self.client.batch_execute(&migration.deploy.sql).await;
+        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        match outcome {
+            Ok(()) => {
+                self.finish_attempt(migration, duration_ms).await?;
+                Ok(ScriptOutcome {
+                    role: ScriptRole::Deploy,
+                    path,
+                    sha256: migration.deploy.sha256.clone(),
+                    duration_ms,
+                })
+            }
+            // The attempt row stays on every failure, and the target stays
+            // blocked until a person has looked.
+            //
+            // Clearing it when the server answered is tempting, on the grounds
+            // that a rejected statement did nothing. That is false for exactly
+            // the statements this mode exists for: a failed
+            // `CREATE INDEX CONCURRENTLY` leaves an invalid index behind, and
+            // the automatic retry a cleared attempt would permit usually fails
+            // again on the name that now exists -- after the operator has been
+            // told the target was fine. Whether to drop that index is a
+            // decision about destroying an object, which is theirs.
+            Err(error) if error.as_db_error().is_some() => {
+                let failure = script_failed(error, ScriptRole::Deploy, &path);
+                self.record_failure(migration, duration_ms, &failure).await;
+                Err(blocked_by(failure, migration))
+            }
+            // The server did not answer: a dropped connection, a killed backend,
+            // a timeout on the client side. The statement may have completed
+            // anyway -- `CREATE INDEX CONCURRENTLY` can and does finish after
+            // the client that asked for it has gone. The attempt row stays.
+            Err(error) => Err(self.outcome_unknown(migration, duration_ms, &error).await),
+        }
+    }
+
+    /// Records an operator's account of an interrupted nontransactional run.
+    ///
+    /// `applied` says the statement took effect. The attempt row is removed
+    /// either way; what differs is whether an `applied_migrations` row replaces
+    /// it. Both branches commit as one transaction with their event, so the
+    /// registry cannot end up unblocked with nothing recorded about why.
+    ///
+    /// This runs no user SQL and undoes nothing. Saying `--not-applied` does
+    /// not drop a half-created index — Zapadka cannot know whether dropping it
+    /// is safe, and a command that quietly destroyed an object while
+    /// "recording" something would be the worst kind of surprise.
+    pub async fn resolve(
+        &mut self,
+        attempt: &registry::UnresolvedAttempt,
+        applied: bool,
+    ) -> Result<()> {
+        let transaction = self
+            .client
+            .transaction()
+            .await
+            .map_err(|error| registry_failed(error, "begin the resolution"))?;
+
+        if applied {
+            registry::record_applied_from_attempt(&transaction, &self.schema, self.run_id, attempt)
+                .await?;
+        }
+        registry::clear_attempt(&transaction, &self.schema, attempt.id).await?;
+
+        self.sequence += 1;
+        record_event(
+            &transaction,
+            &self.schema,
+            self.sequence,
+            self.run_id,
+            &self.facts,
+            &self.zapadka_version,
+            Event {
+                migration_id: Some(attempt.id),
+                action: "resolve",
+                // Not "succeeded": nothing succeeded here. These outcomes say
+                // what a person asserted, and read differently in the history
+                // from anything Zapadka watched happen.
+                outcome: if applied {
+                    "asserted_applied"
+                } else {
+                    "asserted_not_applied"
+                },
+                transaction_mode: Some("forbidden"),
+                definition_sha256: Some(&attempt.definition_sha256),
+                script_role: Some("deploy"),
+                script_sha256: Some(&attempt.deploy_sha256),
+                duration_ms: None,
+                error: None,
+            },
+        )
+        .await?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(|error| registry_failed(error, "commit the resolution"))
+    }
+
+    /// Applies the target's timeouts to the session rather than a transaction.
+    ///
+    /// A `statement_timeout` that fires cancels the statement, and the server
+    /// reports that as an ordinary error — so it produces a definite failure,
+    /// not an unknown outcome. It can still leave an invalid index behind, but
+    /// so can any other failure, and a target that asked for a limit means it.
+    async fn apply_session_timeouts(&mut self) -> Result<()> {
+        for (setting, value) in [
+            ("lock_timeout", self.timeouts.lock_timeout),
+            ("statement_timeout", self.timeouts.statement_timeout),
+        ] {
+            let Some(value) = value else {
+                continue;
+            };
+            // The value is a number Zapadka produced from a parsed duration, so
+            // there is nothing here a configuration file could inject.
+            self.client
+                .batch_execute(&format!(
+                    "SET {setting} = '{}'",
+                    value.as_postgres_setting()
+                ))
+                .await
+                .map_err(|error| registry_failed(error, &format!("apply {setting}")))?;
+        }
+        Ok(())
+    }
+
+    /// Commits the record that a nontransactional statement is about to run.
+    async fn record_attempt(&mut self, migration: &Migration) -> Result<()> {
+        let transaction = self
+            .client
+            .transaction()
+            .await
+            .map_err(|error| registry_failed(error, "begin the attempt record"))?;
+
+        registry::record_attempt(
+            &transaction,
+            &self.schema,
+            self.run_id,
+            migration,
+            &self.facts,
+            &self.zapadka_version,
+        )
+        .await?;
+
+        self.sequence += 1;
+        record_event(
+            &transaction,
+            &self.schema,
+            self.sequence,
+            self.run_id,
+            &self.facts,
+            &self.zapadka_version,
+            Event {
+                migration_id: Some(migration.id),
+                action: "deploy",
+                // Recorded before anything ran, which is the only honest thing
+                // this event can say at the time it is written.
+                outcome: "attempted",
+                transaction_mode: Some("forbidden"),
+                definition_sha256: Some(&migration.definition_sha256),
+                script_role: Some("deploy"),
+                script_sha256: Some(&migration.deploy.sha256),
+                duration_ms: None,
+                error: None,
+            },
+        )
+        .await?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(|error| registry_failed(error, "commit the attempt record"))
+    }
+
+    /// Records a nontransactional statement that succeeded.
+    async fn finish_attempt(&mut self, migration: &Migration, duration_ms: u64) -> Result<()> {
+        let transaction = self
+            .client
+            .transaction()
+            .await
+            .map_err(|error| registry_failed(error, "begin the applied-state record"))?;
+
+        registry::record_applied(&transaction, &self.schema, self.run_id, migration).await?;
+        registry::clear_attempt(&transaction, &self.schema, migration.id).await?;
+
+        self.sequence += 1;
+        record_event(
+            &transaction,
+            &self.schema,
+            self.sequence,
+            self.run_id,
+            &self.facts,
+            &self.zapadka_version,
+            Event {
+                migration_id: Some(migration.id),
+                action: "deploy",
+                outcome: "succeeded",
+                transaction_mode: Some("forbidden"),
+                definition_sha256: Some(&migration.definition_sha256),
+                script_role: Some("deploy"),
+                script_sha256: Some(&migration.deploy.sha256),
+                duration_ms: Some(duration_ms),
+                error: None,
+            },
+        )
+        .await?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(|error| registry_failed(error, "commit the applied state"))
+    }
+
+    /// Records that a nontransactional statement was refused.
+    ///
+    /// The attempt row is deliberately left in place. Best-effort by design:
+    /// the deploy failure is what the operator needs to see, and a second
+    /// failure while writing the event must not replace it.
+    async fn record_failure(&mut self, migration: &Migration, duration_ms: u64, failure: &Error) {
+        let _ = self
+            .record(Event {
+                migration_id: Some(migration.id),
+                action: "deploy",
+                outcome: "failed",
+                transaction_mode: Some("forbidden"),
+                definition_sha256: Some(&migration.definition_sha256),
+                script_role: Some("deploy"),
+                script_sha256: Some(&migration.deploy.sha256),
+                duration_ms: Some(duration_ms),
+                error: Some(failure),
+            })
+            .await;
+    }
+
+    /// Builds the error for a statement whose outcome nobody observed.
+    ///
+    /// Recording this event needs a working connection, which is exactly what
+    /// may have just been lost. The attempt row is already committed, so the
+    /// evidence survives regardless; this is a courtesy for the common case
+    /// where only the query died.
+    async fn outcome_unknown(
+        &mut self,
+        migration: &Migration,
+        duration_ms: u64,
+        cause: &tokio_postgres::Error,
+    ) -> Error {
+        let error = Error::new(
+            zapadka_core::error::ErrorCode::DeployOutcomeUnknown,
+            format!(
+                "the connection failed while running {}, so whether its statement took effect is \
+                 unknown",
+                migration.deploy.relative_path
+            ),
+        )
+        .at(zapadka_core::report::Location::file(
+            &migration.deploy.relative_path,
+        ))
+        .with_context("migration_id", migration.id)
+        .with_context("cause", cause.to_string())
+        .with_hint(
+            "Zapadka will not guess and will not retry: a nontransactional statement can finish \
+             after the client that asked for it has gone. Inspect the database, then record what \
+             you found with `zapadka resolve` -- deploys to this target are blocked until you do.",
+        );
+
+        let _ = self
+            .record(Event {
+                migration_id: Some(migration.id),
+                action: "deploy",
+                outcome: "unknown",
+                transaction_mode: Some("forbidden"),
+                definition_sha256: Some(&migration.definition_sha256),
+                script_role: Some("deploy"),
+                script_sha256: Some(&migration.deploy.sha256),
+                duration_ms: Some(duration_ms),
+                error: Some(&error),
+            })
+            .await;
+
+        error
+    }
+
     /// Runs a migration's `verify.sql` and rolls it back.
     ///
     /// Returns `Ok(None)` when the migration has no verification script, which
@@ -705,6 +1032,30 @@ struct Event<'a> {
 ///
 /// `SET LOCAL` so they last exactly as long as the transaction Zapadka opened
 /// and cannot leak into the next one.
+/// Adds the consequence to a failed nontransactional deploy.
+///
+/// The failure the operator reads and the state the target is left in are two
+/// different facts, and reporting only the first would leave them to discover
+/// the second from whatever they ran next.
+fn blocked_by(failure: Error, migration: &Migration) -> Error {
+    // PostgreSQL's own HINT is often the most actionable line in the whole
+    // failure, and `script_failed` has already carried it through. Appending
+    // rather than replacing keeps both: what to fix, and what state the target
+    // is in while you fix it.
+    let server_hint = failure
+        .hint()
+        .map(|hint| format!("{hint}\n\n"))
+        .unwrap_or_default();
+    let hint = format!(
+        "the target is now blocked. A nontransactional statement can fail after doing part of its \
+         work -- a failed CREATE INDEX CONCURRENTLY leaves an invalid index -- so Zapadka will not \
+         decide on its own that nothing happened. Check the database, clean up anything left \
+         behind, then run `zapadka resolve {} --not-applied`.",
+        zapadka_core::migration::short_id(migration.id)
+    );
+    failure.with_hint(format!("{server_hint}{hint}"))
+}
+
 pub(crate) async fn apply_timeouts(
     transaction: &PgTransaction<'_>,
     timeouts: Timeouts,

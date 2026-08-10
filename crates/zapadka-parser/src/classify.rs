@@ -136,6 +136,24 @@ impl StatementKind {
             _ => None,
         }
     }
+
+    /// Returns the construct name when running this statement would destroy the
+    /// session state Zapadka depends on.
+    ///
+    /// `DISCARD ALL` is implemented partly as `pg_advisory_unlock_all()`, and
+    /// Zapadka's deployment lock is session-scoped. A migration containing it
+    /// would hand the lock back mid-run, letting a second deploy start while
+    /// this one is still applying migrations — the exact overlap the lock
+    /// exists to prevent, arrived at without anything failing.
+    ///
+    /// It can only be reached from the nontransactional path, since PostgreSQL
+    /// refuses `DISCARD ALL` inside a transaction block on its own.
+    pub fn breaks_runner_session(&self) -> Option<&'static str> {
+        match self {
+            Self::NonTransactional(construct @ "DISCARD") => Some(construct),
+            _ => None,
+        }
+    }
 }
 
 /// The specific transaction-control operation a rejected statement performs.

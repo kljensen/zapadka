@@ -293,6 +293,22 @@ impl Project {
     }
 
     /// Writes a migration package with optional revert and verify scripts.
+    /// Creates a migration that declares `transaction = "forbidden"`.
+    ///
+    /// Irreversible, because the statements that need this mode -- index
+    /// builds, mostly -- are the ones whose undo is itself nontransactional.
+    pub fn nontransactional_migration(&self, slug: &str, depends: &[Uuid], deploy: &str) -> Uuid {
+        let id = self.migration_with(slug, depends, deploy, None, None);
+        let manifest = self.migration_dir(id).join("migration.toml");
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        std::fs::write(
+            &manifest,
+            text.replace("transaction = \"required\"", "transaction = \"forbidden\""),
+        )
+        .unwrap();
+        id
+    }
+
     pub fn migration_with(
         &self,
         slug: &str,
