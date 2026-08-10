@@ -51,6 +51,7 @@ pub fn plan(graph: &Graph, applied: &BTreeMap<Uuid, AppliedMigration>) -> Result
     for (id, record) in applied {
         let migration = graph.get(*id).ok_or_else(|| missing(record))?;
         check_unchanged(migration, record)?;
+        check_dependencies_applied(migration, applied)?;
     }
 
     let ordered = graph.deployment_order();
@@ -69,6 +70,47 @@ pub fn plan(graph: &Graph, applied: &BTreeMap<Uuid, AppliedMigration>) -> Result
         pending,
         applied: already,
     })
+}
+
+/// Fails when an applied migration's prerequisites are not themselves applied.
+///
+/// The applied set should always be closed under dependencies, because
+/// deployment order guarantees it. A set that is not closed means something
+/// outside Zapadka changed the registry — a partial restore, a hand-written
+/// `DELETE`. Left alone, the missing prerequisite is simply classified as
+/// pending, and the next deploy runs it *after* the migration that depends on
+/// it, which is the one thing the graph exists to prevent.
+fn check_dependencies_applied(
+    migration: &Migration,
+    applied: &BTreeMap<Uuid, AppliedMigration>,
+) -> Result<()> {
+    let absent: Vec<String> = migration
+        .depends()
+        .iter()
+        .filter(|dependency| !applied.contains_key(dependency))
+        .map(|dependency| short_id(*dependency))
+        .collect();
+
+    if absent.is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::new(
+        ErrorCode::HistoryMigrationMissing,
+        format!(
+            "applied migration {} depends on {} which {} not applied",
+            migration.label(),
+            absent.join(", "),
+            if absent.len() == 1 { "is" } else { "are" }
+        ),
+    )
+    .with_context("migration_id", migration.id)
+    .with_context("missing_dependencies", absent.join(", "))
+    .with_hint(
+        "the registry has been changed outside Zapadka: a migration is recorded as applied while \
+         something it depends on is not. Deploying now would run the prerequisite after its \
+         dependent. Restore the registry from a backup rather than letting Zapadka guess.",
+    ))
 }
 
 /// The error for a migration the database has but the project does not.
@@ -340,17 +382,38 @@ mod tests {
     fn reordering_a_dependency_list_is_not_a_history_change() {
         // The edges are a set. Rewriting the list in a different order is a
         // cosmetic change and must not look like tampering.
+        let (first, second) = (migration(1, &[], "a"), migration(2, &[], "b"));
         let mut deployed = record_of(&migration(3, &[1, 2], "c"));
         deployed.depends = vec![id(2), id(1)];
         let current = migration(3, &[2, 1], "c");
-        let graph = Graph::build(vec![
-            migration(1, &[], "a"),
-            migration(2, &[], "b"),
-            current,
-        ])
-        .unwrap();
+        let graph = Graph::build(vec![first.clone(), second.clone(), current]).unwrap();
 
-        assert!(plan(&graph, &applied(vec![deployed])).is_ok());
+        // The prerequisites are applied too, as they always are in a registry
+        // Zapadka wrote.
+        let state = applied(vec![record_of(&first), record_of(&second), deployed]);
+        assert!(plan(&graph, &state).is_ok());
+    }
+
+    #[test]
+    fn an_applied_migration_whose_prerequisite_is_not_applied_is_a_hard_failure() {
+        // Only Zapadka writes this table, and deployment order guarantees the
+        // applied set is closed under dependencies. A set that is not closed
+        // means something else edited the registry -- and simply carrying on
+        // would deploy the prerequisite *after* its dependent.
+        let base = migration(1, &[], "a");
+        let dependent = migration(2, &[1], "b");
+        let graph = Graph::build(vec![base, dependent.clone()]).unwrap();
+
+        let error = plan(&graph, &applied(vec![record_of(&dependent)])).unwrap_err();
+        assert_eq!(error.code, ErrorCode::HistoryMigrationMissing);
+        assert_eq!(
+            error
+                .context()
+                .get("missing_dependencies")
+                .map(String::as_str),
+            Some("0198f5c0")
+        );
+        assert!(error.hint().unwrap().contains("outside Zapadka"));
     }
 
     #[test]

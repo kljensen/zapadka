@@ -281,6 +281,19 @@ fn hash_tree(tree: &Utf8Path) -> Result<BTreeMap<String, String>> {
         .into_iter()
         .filter_map(Result::ok)
     {
+        // A symlink is not a file, so it would be skipped silently — and the
+        // parser's build script selects sources by extension, not by file type.
+        // An unrecorded `*.c` symlink pointing outside the tree would therefore
+        // be compiled into the binary while passing verification. Vendored
+        // upstream releases contain no symlinks, so the honest answer is to
+        // refuse rather than invent a hashing rule for them.
+        if entry.file_type().is_symlink() {
+            bail!(
+                "{} is a symbolic link. Vendored trees contain only regular files: a link can \
+                 point outside the verified tree and still be compiled.",
+                entry.path().display()
+            );
+        }
         if !entry.file_type().is_file() {
             continue;
         }
