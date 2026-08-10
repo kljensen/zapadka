@@ -68,12 +68,23 @@ pub fn lookup(name: &str) -> Result<ServiceSettings> {
 /// possible disagreement for a tool that deploys migrations.
 fn candidate_paths() -> Vec<String> {
     let mut paths = Vec::new();
-    if let Ok(file) = std::env::var("PGSERVICEFILE") {
-        paths.push(file);
+
+    // `PGSERVICEFILE` *replaces* the per-user file rather than being searched
+    // before it -- libpq describes the user file as "~/.pg_service.conf, or the
+    // location specified by PGSERVICEFILE". Searching both would let Zapadka
+    // find a service in the home file that `psql`, with the same environment,
+    // would not.
+    match std::env::var("PGSERVICEFILE") {
+        Ok(file) => paths.push(file),
+        Err(_) => {
+            if let Ok(home) = std::env::var("HOME") {
+                paths.push(format!("{home}/.pg_service.conf"));
+            }
+        }
     }
-    if let Ok(home) = std::env::var("HOME") {
-        paths.push(format!("{home}/.pg_service.conf"));
-    }
+
+    // The system-wide file is searched after the per-user one, because libpq
+    // gives the user file precedence when both define the same service.
     if let Ok(dir) = std::env::var("PGSYSCONFDIR") {
         paths.push(format!("{dir}/pg_service.conf"));
     }

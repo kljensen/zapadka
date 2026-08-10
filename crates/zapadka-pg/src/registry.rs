@@ -228,6 +228,81 @@ pub async fn server_facts(client: &Client) -> Result<ServerFacts> {
     Ok(facts)
 }
 
+/// Finds any Zapadka registry in the database, whatever schema it is in.
+///
+/// `registry_schema` is configurable, so two projects pointed at one database
+/// with different schema names would each see only their own registry, both
+/// pass the ownership check, take different advisory locks, and deploy
+/// concurrently -- exactly the situation ADR-0003 exists to prevent.
+///
+/// So ownership is established database-wide, by looking for the shape of a
+/// Zapadka `meta` table rather than for a particular schema name.
+pub async fn find_owning_project(client: &Client) -> Result<Option<(String, Uuid)>> {
+    // Matched on the column set, which is distinctive enough that an unrelated
+    // table called `meta` will not collide.
+    let row = client
+        .query_opt(
+            "SELECT n.nspname \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relname = 'meta' AND c.relkind = 'r' \
+               AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+               AND (SELECT count(*) FROM pg_attribute a \
+                    WHERE a.attrelid = c.oid AND NOT a.attisdropped \
+                      AND a.attname IN ('singleton', 'project_id', \
+                                        'registry_format_version')) = 3 \
+             ORDER BY n.nspname \
+             LIMIT 1",
+            &[],
+        )
+        .await
+        .map_err(|error| registry_failed(error, "look for an existing Zapadka registry"))?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let schema: String = row.get(0);
+
+    let quoted = quote_identifier(&schema);
+    let meta = client
+        .query_opt(&format!("SELECT project_id FROM {quoted}.meta"), &[])
+        .await
+        .map_err(|error| registry_failed(error, "read the registry metadata"))?;
+
+    Ok(meta.map(|row| (schema, row.get::<_, Uuid>(0))))
+}
+
+/// Refuses to act on a database another project already owns.
+///
+/// Complements [`check_project`], which compares against the registry in the
+/// configured schema. This one catches the case where the schema names differ.
+pub async fn check_database_ownership(
+    client: &Client,
+    configured_schema: &str,
+    project_id: Uuid,
+) -> Result<()> {
+    let Some((schema, owner)) = find_owning_project(client).await? else {
+        return Ok(());
+    };
+    if owner == project_id {
+        return Ok(());
+    }
+
+    Err(Error::new(
+        ErrorCode::RegistryProjectMismatch,
+        format!("this database already holds Zapadka project {owner}, in schema {schema}"),
+    )
+    .with_context("registry_project_id", owner)
+    .with_context("registry_schema", &schema)
+    .with_context("configured_project_id", project_id)
+    .with_context("configured_registry_schema", configured_schema)
+    .with_hint(
+        "one database holds one project's history. Renaming registry_schema does not make room \
+         for a second project -- it would give two projects separate locks and let them deploy \
+         over each other. Point this project at its own database.",
+    ))
+}
+
 /// Reads the current registry state.
 ///
 /// A database with no registry is a normal state, not an error: it is what

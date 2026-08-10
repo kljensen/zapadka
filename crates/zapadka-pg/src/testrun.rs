@@ -174,11 +174,17 @@ pub struct AdvancedSequence {
 /// System catalogs and Zapadka's own schemas are excluded: nothing in a test
 /// file should be touching those.
 async fn snapshot_sequences(client: &Client) -> Result<Vec<SequenceState>> {
+    // Restricted to sequences the role can actually advance. A database can
+    // contain sequences belonging to other applications that this role cannot
+    // touch; requiring SELECT on those would fail the suite before a single
+    // test ran, for sequences no test could move anyway.
     let rows = client
         .query(
             "SELECT format('%I.%I', schemaname, sequencename) \
              FROM pg_sequences \
              WHERE schemaname NOT IN ('pg_catalog', 'information_schema', $1, $2) \
+               AND has_sequence_privilege( \
+                     format('%I.%I', schemaname, sequencename), 'USAGE,UPDATE') \
              ORDER BY 1",
             &[&pgtap::TEST_SCHEMA, &"zapadka"],
         )

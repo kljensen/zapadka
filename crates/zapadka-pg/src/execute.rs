@@ -247,24 +247,33 @@ impl Runner {
             "failed"
         };
         let error = result.as_ref().err();
-        self.record(Event {
-            migration_id: Some(migration.id),
-            action: "verify",
-            outcome,
-            transaction_mode: Some("required"),
-            definition_sha256: Some(&migration.definition_sha256),
-            script_role: Some("verify"),
-            // The exact bytes verified, recorded because `verify.sql` is
-            // mutable: a past run's result only means something alongside the
-            // script that produced it.
-            script_sha256: Some(&script.sha256),
-            duration_ms: Some(duration_ms),
-            error,
-        })
-        .await
-        .ok();
+        let recorded = self
+            .record(Event {
+                migration_id: Some(migration.id),
+                action: "verify",
+                outcome,
+                transaction_mode: Some("required"),
+                definition_sha256: Some(&migration.definition_sha256),
+                script_role: Some("verify"),
+                // The exact bytes verified, recorded because `verify.sql` is
+                // mutable: a past run's result only means something alongside the
+                // script that produced it.
+                script_sha256: Some(&script.sha256),
+                duration_ms: Some(duration_ms),
+                error,
+            })
+            .await;
 
+        // A verification event cannot commit with the thing it describes, since
+        // the verification transaction is always rolled back. So a failure to
+        // record one is reported rather than swallowed: "verified" is a claim
+        // about history, and it is not true if the history was not written.
+        //
+        // A *failed* verification reports its own error first, because that is
+        // the more useful thing to tell someone when both went wrong.
         result?;
+        recorded?;
+
         Ok(Some(ScriptOutcome {
             role: ScriptRole::Verify,
             path: script.relative_path.clone(),

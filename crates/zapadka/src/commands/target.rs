@@ -44,6 +44,11 @@ pub async fn open(
     // a different project would otherwise be read as if it were ours, and a
     // mutating command would act on it.
     registry::check_project(&state, config.config.project.id)?;
+    // And again database-wide, because `registry_schema` is configurable: two
+    // projects with different schema names would each see only their own
+    // registry and both conclude the database was theirs.
+    registry::check_database_ownership(&connection.client, &schema, config.config.project.id)
+        .await?;
 
     if !connection.encrypted && !connection.encryption_opted_out {
         session.diagnose(Diagnostic {
@@ -144,6 +149,7 @@ pub async fn refresh_state(
 ) -> Result<RegistryState> {
     let state = registry::read(client, schema).await?;
     registry::check_project(&state, config.config.project.id)?;
+    registry::check_database_ownership(client, schema, config.config.project.id).await?;
     Ok(state)
 }
 

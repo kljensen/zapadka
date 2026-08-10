@@ -1394,3 +1394,38 @@ fn a_failed_post_deploy_verification_names_the_script_that_failed() {
             .ends_with("verify.sql")
     );
 }
+
+#[test]
+fn renaming_the_registry_schema_does_not_make_room_for_a_second_project() {
+    // `registry_schema` is configurable, so two projects pointed at one
+    // database with different schema names would each see only their own
+    // registry, both conclude the database was theirs, take different
+    // project-derived advisory locks, and deploy over each other.
+    let db = database();
+    let owner = project();
+    owner.migration("first", &[], "CREATE TABLE public.a (i int);");
+    owner
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    let intruder = project();
+    let config = intruder.root().join("zapadka.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        text.replace(
+            "registry_schema = \"zapadka\"",
+            "registry_schema = \"zapadka_other\"",
+        ),
+    )
+    .unwrap();
+    intruder.migration("other", &[], "CREATE TABLE public.b (i int);");
+
+    let report = intruder.report(&["deploy", "--uri", &db.uri()]);
+    report.assert_failed("registry.project_mismatch", exit::REGISTRY);
+    assert_eq!(
+        db.scalar("SELECT count(*) FROM pg_namespace WHERE nspname = 'zapadka_other'"),
+        "0",
+        "the second project must not have created its own registry"
+    );
+}
