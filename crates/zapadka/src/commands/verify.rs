@@ -84,6 +84,12 @@ async fn verify_under_lock(
     if let Err(error) = target::require_initialized(&state, name) {
         return (client, Err(error));
     }
+    // Verification reads a schema and reports on it. An unresolved attempt
+    // means Zapadka cannot say what that schema contains, so a verification
+    // result from it would carry more authority than it has earned.
+    if let Err(error) = target::require_not_blocked(&state, name) {
+        return (client, Err(error));
+    }
 
     let selected = match history::plan(graph, &state.applied)
         .and_then(|plan| select(graph, &plan.applied, &args.migrations))

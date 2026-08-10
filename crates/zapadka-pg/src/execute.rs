@@ -262,15 +262,20 @@ impl Runner {
         let started = Instant::now();
         let path = migration.deploy.relative_path.clone();
 
-        // Step 1, committed on its own. If this fails, nothing has run, and the
-        // failure is an ordinary one.
-        self.record_attempt(migration).await?;
-
         // The target's limits still apply, but they have to be set on the
         // session: `SET LOCAL` needs a transaction, which is the one thing this
         // statement cannot have. They are left set afterwards only for as long
         // as this connection lives, and it is Zapadka's own.
+        //
+        // Before the attempt is recorded, not after. A rejected `SET` -- a
+        // duration PostgreSQL's GUC range will not take, say -- would otherwise
+        // leave a committed attempt for a statement that never ran, and block
+        // the target until someone resolved a question with no substance.
         self.apply_session_timeouts().await?;
+
+        // Step 1, committed on its own. If this fails, nothing has run, and the
+        // failure is an ordinary one.
+        self.record_attempt(migration).await?;
 
         // Step 2, outside any transaction. `batch_execute` on the client itself
         // runs in autocommit, which is what the statement requires.

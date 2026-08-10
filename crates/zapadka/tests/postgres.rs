@@ -1793,6 +1793,58 @@ fn resolving_as_applied_records_it_without_running_any_sql() {
 }
 
 #[test]
+fn every_command_that_acts_on_a_blocked_target_refuses() {
+    let db = database();
+    let project = project();
+    let id = project.migration(
+        "orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint, total numeric);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // `test` returns early when a project has no test files, so it needs one
+    // here to reach the guard at all.
+    project.test_file(
+        "tests/db/orders.sql",
+        "SELECT zapadka_test.plan(1);\nSELECT zapadka_test.ok(true, 'x');\nSELECT zapadka_test.finish();\n",
+    );
+
+    let blocked = project.nontransactional_migration(
+        "add-index",
+        &[],
+        "CREATE INDEX CONCURRENTLY idx ON public.orders (total);",
+    );
+    insert_attempt(&db, blocked, "add-index");
+
+    // Anything that would act on the schema refuses; only reporting continues.
+    let uri = db.uri();
+    let target = id.to_string();
+    for args in [
+        vec!["deploy"],
+        vec!["verify"],
+        vec!["revert", &target],
+        vec!["test"],
+    ] {
+        let mut argv = args.clone();
+        argv.extend_from_slice(&["--uri", &uri]);
+        let report = project.report(&argv);
+        assert_eq!(
+            report.error_code(),
+            "registry.blocked",
+            "`zapadka {}` must refuse a blocked target",
+            args.join(" ")
+        );
+    }
+
+    project
+        .report(&["status", "--uri", &db.uri()])
+        .assert_success();
+}
+
+#[test]
 fn resolve_refuses_without_being_told_what_happened() {
     let db = database();
     let project = project();
