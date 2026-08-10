@@ -161,6 +161,10 @@ fn write_migration(
         // beside this line, not in the status: both directions are a
         // resolution that succeeded.
         (Action::Resolve, _) => "resolved",
+        // Before the action arms, because blocked is a fact about the migration
+        // rather than about what this run did with it -- and it is the one
+        // state on a `status` line that an operator has to act on.
+        (_, Status::Blocked) => "blocked",
         // A run that stopped early still lists what it did not get to, so the
         // report accounts for every migration it selected.
         (_, Status::Skipped) => "skipped",
@@ -375,6 +379,25 @@ mod tests {
             duration_ms: Some(35),
             error: None,
         }
+    }
+
+    #[test]
+    fn a_blocked_migration_is_labelled_blocked_rather_than_planned() {
+        // `status` records these as a plan entry, since it planned nothing.
+        // The line an operator reads has to name the state they must act on,
+        // not the action the command took.
+        let mut report = report();
+        report.run.command = "status".to_owned();
+        report
+            .migrations
+            .push(migration(Status::Blocked, Action::Plan));
+
+        let rendered = render_to_string(&report);
+        assert!(
+            rendered.contains("! blocked 0198f5c0 add-orders"),
+            "expected a blocked line, got:\n{rendered}"
+        );
+        assert!(!rendered.contains("planned"));
     }
 
     fn render_to_string(report: &ReportV1) -> String {
