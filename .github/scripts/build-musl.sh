@@ -34,10 +34,20 @@ if [ -z "$DIGEST" ]; then
   esac
 fi
 
+# The build itself has to run as root, because it installs packages. On a Linux
+# Docker host that leaves the bind-mounted target/ tree owned by root, which the
+# host then cannot clean up -- so ownership is handed back before the container
+# exits. (On Docker Desktop and OrbStack the file-sharing layer hides this,
+# which is exactly why it is worth doing explicitly rather than discovering it
+# on the first release.)
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+
 exec docker run --rm --platform "$PLATFORM" \
   -v "$PWD:/src" -w /src \
   "rust@$DIGEST" \
   sh -euc "
     apk add --no-cache musl-dev build-base >/dev/null
     cargo build --release --locked --target '$TARGET' -p zapadka
+    chown -R '$HOST_UID:$HOST_GID' /src/target
   "

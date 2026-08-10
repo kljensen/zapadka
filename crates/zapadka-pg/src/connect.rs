@@ -300,7 +300,17 @@ pub async fn connect(resolved: &Resolved) -> Result<Connection> {
             .unwrap_or(false)
     };
 
-    let database = config.get_dbname().unwrap_or_default().to_owned();
+    // Asked of the server rather than read from the configuration. When a URI
+    // or service entry omits `dbname`, PostgreSQL defaults it to the user name,
+    // and a report saying the database was "" would be worse than saying
+    // nothing.
+    let database = client
+        .query_one("SELECT current_database()", &[])
+        .await
+        .map_or_else(
+            |_| config.get_dbname().unwrap_or_default().to_owned(),
+            |row| row.get::<_, String>(0),
+        );
 
     Ok(Connection {
         client,

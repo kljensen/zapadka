@@ -203,8 +203,14 @@ impl Manifest {
             }
         }
 
-        match (self.reversibility, self.irreversible_reason.as_deref()) {
-            (Reversibility::Irreversible, None | Some("")) => {
+        // `Some("   ")` is not `Some("")`, so the reason is trimmed before it
+        // is judged; a reason made of spaces explains nothing.
+        let stated_reason = self
+            .irreversible_reason
+            .as_deref()
+            .filter(|reason| !reason.trim().is_empty());
+        match (self.reversibility, stated_reason) {
+            (Reversibility::Irreversible, None) => {
                 return Err(Error::new(
                     ErrorCode::MigrationReversibilityInvalid,
                     "an irreversible migration must state irreversible_reason",
@@ -415,6 +421,22 @@ mod tests {
              irreversible_reason = \"drops archived rows that are not recoverable\"\n"
         ))
         .unwrap();
+    }
+
+    #[test]
+    fn a_reason_made_of_whitespace_is_not_a_reason() {
+        for blank in ["", "   ", "\t", "\n  "] {
+            let error = parse(&format!(
+                "format_version = 1\nid = \"{A}\"\nreversibility = \"irreversible\"\n\
+                 irreversible_reason = {blank:?}\n"
+            ))
+            .unwrap_err();
+            assert_eq!(
+                error.code,
+                ErrorCode::MigrationReversibilityInvalid,
+                "{blank:?}"
+            );
+        }
     }
 
     #[test]

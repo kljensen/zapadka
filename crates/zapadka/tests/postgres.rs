@@ -1301,3 +1301,22 @@ fn a_successful_revert_records_exactly_one_event_atomically() {
         "0"
     );
 }
+
+#[test]
+fn the_report_names_the_database_the_server_says_it_is_connected_to() {
+    // A URI can omit the database name, in which case PostgreSQL defaults it to
+    // the user name. Reading it back from the configuration would report an
+    // empty string for a perfectly ordinary connection.
+    let db = database();
+    let project = project();
+
+    let report = project.report(&["status", "--uri", &db.uri()]);
+    report.assert_success();
+    assert_eq!(
+        report.json["target"]["database"]
+            .as_str()
+            .unwrap_or_default(),
+        db.name(),
+        "the report should name the database actually connected to"
+    );
+}

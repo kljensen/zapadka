@@ -71,26 +71,12 @@ pub async fn run(
         .map(|target| target.application_schemas.clone())
         .unwrap_or_default();
 
-    // The suite must run against the schema it was written for.
+    // Checked once here so an obviously unprepared target fails before waiting
+    // for a lock; checked again under the lock, which is the check that counts.
     target::require_initialized(&opened.state, &opened.name)?;
-    let plan = history::plan(graph, &opened.state.applied)?;
-    if !plan.pending.is_empty() {
-        return Err(Error::new(
-            ErrorCode::RegistryNotInitialized,
-            format!(
-                "target {} has {} migration(s) that are not applied",
-                opened.name,
-                plan.pending.len()
-            ),
-        )
-        .with_context("pending", plan.pending.len())
-        .with_hint(
-            "Zapadka does not deploy to a test target implicitly; run `zapadka deploy` against it \
-             first, so the schema the suite runs against is one you chose",
-        ));
-    }
 
     let (name, server_version) = (opened.name.clone(), opened.facts.server_version.clone());
+    let schema = opened.schema.clone();
     let mut client = opened.connection.client;
 
     // Taken before the pgTAP install and held until the last file has run.
@@ -103,10 +89,12 @@ pub async fn run(
 
     let outcome = run_suite(
         config,
+        graph,
         args,
         session,
         &mut client,
         &name,
+        &schema,
         &server_version,
         &selected,
         &application_schemas,
@@ -121,14 +109,38 @@ pub async fn run(
 #[allow(clippy::too_many_arguments)]
 async fn run_suite(
     config: &LoadedConfig,
+    graph: &Graph,
     args: &TestArgs,
     session: &mut Session,
     client: &mut zapadka_pg::Client,
     name: &str,
+    schema: &str,
     server_version: &str,
     selected: &[testsuite::TestFile],
     application_schemas: &[String],
 ) -> Result<()> {
+    // Read again now the lock is held: a deploy or revert from another checkout
+    // could have finished while this command was waiting, and the suite would
+    // otherwise run against a schema nobody validated.
+    let state = target::refresh_state(client, config, schema).await?;
+    target::require_initialized(&state, name)?;
+
+    let plan = history::plan(graph, &state.applied)?;
+    if !plan.pending.is_empty() {
+        return Err(Error::new(
+            ErrorCode::RegistryNotInitialized,
+            format!(
+                "target {name} has {} migration(s) that are not applied",
+                plan.pending.len()
+            ),
+        )
+        .with_context("pending", plan.pending.len())
+        .with_hint(
+            "Zapadka does not deploy to a test target implicitly; run `zapadka deploy` against it \
+             first, so the schema the suite runs against is one you chose",
+        ));
+    }
+
     ensure_pgtap(client, server_version, session).await?;
 
     let mut failures = 0usize;

@@ -38,8 +38,14 @@ digest() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum 
 say() { printf '\n=== %s ===\n' "$1"; }
 
 # Runs the binary inside the minimal container.
+#
+# As the invoking user, not as root. Otherwise `init` and `new` create
+# root-owned files in the bind-mounted project directory, and the host shell
+# below cannot overwrite the generated scripts. Zapadka needs no privileges of
+# its own, so there is nothing lost.
 zapadka() {
   docker run --rm --network "$NETWORK" ${ZAPADKA_PLATFORM:+--platform "$ZAPADKA_PLATFORM"} \
+    --user "$(id -u):$(id -g)" \
     -v "$BINARY:/zapadka:ro" \
     -v "$WORKDIR:/project" \
     -w /project \
@@ -121,22 +127,14 @@ docker exec "$CONTAINER" psql -U postgres -d app -tAc \
   || { echo "FAIL: the orders table does not have the expected columns"; exit 1; }
 
 say "a modified deployed migration is detected"
-echo "-- an edit made after deployment" >> "$WORKDIR/migrations/$FIRST/deploy.sql"
 
-# Wait until the container actually observes the edit before asserting on it.
-# On Linux the bind mount is immediate; a macOS file-sharing layer can serve a
-# briefly stale copy, and a test that raced that would be reporting on the
-# mount rather than on Zapadka.
-EXPECTED="$(digest "$WORKDIR/migrations/$FIRST/deploy.sql" | cut -d' ' -f1)"
-for _ in $(seq 1 50); do
-  SEEN="$(docker run --rm ${ZAPADKA_PLATFORM:+--platform "$ZAPADKA_PLATFORM"} \
-    -v "$WORKDIR:/w" "$RUNNER_IMAGE" \
-    sha256sum "/w/migrations/$FIRST/deploy.sql" | cut -d' ' -f1)"
-  [ "$SEEN" = "$EXPECTED" ] && break
-  sleep 0.2
-done
-[ "$SEEN" = "$EXPECTED" ] \
-  || { echo "FAIL: the container never observed the edited file"; exit 1; }
+# Edited from inside a container, on the same mount Zapadka reads through.
+# Editing from the host and waiting for the change to appear made this test a
+# probe of the file-sharing layer rather than of Zapadka.
+docker run --rm ${ZAPADKA_PLATFORM:+--platform "$ZAPADKA_PLATFORM"} \
+  --user "$(id -u):$(id -g)" \
+  -v "$WORKDIR:/w" "$RUNNER_IMAGE" \
+  sh -c "echo '-- an edit made after deployment' >> '/w/migrations/$FIRST/deploy.sql'"
 
 if zapadka status --uri "$URI" --output json > "$WORKDIR/tampered.json" 2>/dev/null; then
   echo "FAIL: editing a deployed migration should have failed"
@@ -156,7 +154,7 @@ set -e
 
 say "the JSON report is exactly one document"
 zapadka status --uri "$URI" --output json > "$WORKDIR/report.json" 2>/dev/null || true
-docker run --rm -v "$WORKDIR:/w" "$RUNNER_IMAGE" \
+docker run --rm --user "$(id -u):$(id -g)" -v "$WORKDIR:/w" "$RUNNER_IMAGE" \
   sh -c 'head -c1 /w/report.json | grep -q "{"' \
   || { echo "FAIL: the JSON report does not start with an object"; exit 1; }
 
