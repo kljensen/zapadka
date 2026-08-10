@@ -259,6 +259,25 @@ impl ExitCode {
     pub fn code_u8(self) -> u8 {
         self as u8
     }
+
+    /// Recovers an exit code from its numeric form.
+    ///
+    /// An unrecognized value maps to [`ExitCode::Internal`]: a code Zapadka
+    /// does not define did not come from Zapadka.
+    pub fn from_code(code: i32) -> Self {
+        match code {
+            0 => Self::Success,
+            2 => Self::Usage,
+            3 => Self::Project,
+            4 => Self::Validation,
+            5 => Self::History,
+            6 => Self::Lock,
+            7 => Self::Target,
+            8 => Self::Registry,
+            9 => Self::Execution,
+            _ => Self::Internal,
+        }
+    }
 }
 
 /// A Zapadka failure.
@@ -429,6 +448,17 @@ mod tests {
                 "{code} must not reuse the usage exit code"
             );
         }
+    }
+
+    #[test]
+    fn exit_codes_round_trip_through_their_numeric_form() {
+        for code in ALL_CODES {
+            let exit = code.exit_code();
+            assert_eq!(ExitCode::from_code(exit.code()), exit, "{code}");
+        }
+        assert_eq!(ExitCode::from_code(0), ExitCode::Success);
+        // A code Zapadka does not define did not come from Zapadka.
+        assert_eq!(ExitCode::from_code(137), ExitCode::Internal);
     }
 
     #[test]

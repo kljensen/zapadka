@@ -168,14 +168,19 @@ async fn snapshot_sequences(client: &Client) -> Result<Vec<SequenceState>> {
         let name: String = row.get(0);
         // `last_value` and `is_called` are not exposed by pg_sequences, so the
         // sequence itself has to be read.
-        let Ok(state) = client
+        // A role can hold USAGE on a sequence -- enough to call `nextval()` --
+        // without SELECT, which is what reading its position needs. Skipping it
+        // would leave a sequence a test can advance and Zapadka cannot restore,
+        // quietly withdrawing the isolation guarantee for that one sequence.
+        let state = client
             .query_one(&format!("SELECT last_value, is_called FROM {name}"), &[])
             .await
-        else {
-            // A sequence the connecting role cannot read is one a test cannot
-            // move either, so there is nothing to restore.
-            continue;
-        };
+            .map_err(|error| {
+                registry_failed(error, &format!("read sequence {name}")).with_hint(
+                    "the test role needs SELECT on every sequence it can advance, so that \
+                         Zapadka can put it back after each file",
+                )
+            })?;
         states.push(SequenceState {
             name,
             last_value: state.get(0),
@@ -188,15 +193,13 @@ async fn snapshot_sequences(client: &Client) -> Result<Vec<SequenceState>> {
 /// Puts back any sequence the test file moved.
 async fn restore_sequences(client: &Client, before: &[SequenceState]) -> Result<()> {
     for state in before {
-        let Ok(row) = client
+        let row = client
             .query_one(
                 &format!("SELECT last_value, is_called FROM {}", state.name),
                 &[],
             )
             .await
-        else {
-            continue;
-        };
+            .map_err(|error| registry_failed(error, &format!("read sequence {}", state.name)))?;
         let now = SequenceState {
             name: state.name.clone(),
             last_value: row.get(0),

@@ -34,6 +34,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          # A manual run names the tag to build. Without this it would build the
+          # default branch and report the result as if it were that tag.
+          ref: ${{ inputs.tag || github.ref }}
 
       # Built inside a pinned Alpine image rather than on the runner. Alpine's
       # Rust is musl-native, so the result is genuinely static rather than a
@@ -104,11 +108,14 @@ jobs:
             done
           } > target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}.vendored.md
 
+      # Renamed before hashing, so `sha256sum -c` works on the files as
+      # downloaded. Hashing `zapadka` and shipping `zapadka-<target>` produces a
+      # checksum file that refers to a name nobody has.
       - name: Checksum
         run: |
           cd target/${{ matrix.target }}/release
-          sha256sum zapadka > zapadka-${{ matrix.target }}.sha256
           mv zapadka zapadka-${{ matrix.target }}
+          sha256sum zapadka-${{ matrix.target }} > zapadka-${{ matrix.target }}.sha256
 
       - uses: actions/upload-artifact@v4
         with:

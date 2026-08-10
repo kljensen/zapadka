@@ -427,11 +427,12 @@ impl ReportV1 {
     }
 
     /// The exit code this report implies.
+    ///
+    /// Derived from the recorded numeric code, not from the outcome alone: a
+    /// history mismatch is not an internal error, and a helper that said so
+    /// would contradict the very field it is reading.
     pub fn exit(&self) -> ExitCode {
-        match self.outcome {
-            Outcome::Success => ExitCode::Success,
-            Outcome::Failure => ExitCode::Internal,
-        }
+        ExitCode::from_code(self.exit_code)
     }
 
     /// Serializes the report as the single JSON document written to stdout.

@@ -16,7 +16,7 @@ use zapadka_core::config::LoadedConfig;
 use zapadka_core::error::{Error, ErrorCode, Result};
 use zapadka_core::graph::Graph;
 use zapadka_core::migration::Migration;
-use zapadka_core::report::{Action, Status};
+use zapadka_core::report::{Action, Script, ScriptRole, Status};
 use zapadka_pg::execute::Runner;
 use zapadka_pg::{RegistryState, history, lock};
 
@@ -124,6 +124,18 @@ async fn revert_one(
         }
         Err(error) => {
             let mut result = result_of(migration, Action::Revert, Status::Failed);
+            // Named with its hash, because `revert.sql` is mutable and a failed
+            // revert is exactly when someone needs to know which bytes ran.
+            if let Some(script) = &migration.revert {
+                result.scripts.push(Script {
+                    role: ScriptRole::Revert,
+                    path: script.relative_path.clone(),
+                    sha256: script.sha256.clone(),
+                    status: Status::Failed,
+                    duration_ms: None,
+                    error: Some((&error).into()),
+                });
+            }
             result.error = Some((&error).into());
             session.migrations.push(result);
             Err(error)

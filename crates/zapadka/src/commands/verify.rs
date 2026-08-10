@@ -16,7 +16,7 @@ use zapadka_core::config::LoadedConfig;
 use zapadka_core::error::{Error, ErrorCode, Result};
 use zapadka_core::graph::Graph;
 use zapadka_core::migration::short_id;
-use zapadka_core::report::{Action, Status};
+use zapadka_core::report::{Action, Script, ScriptRole, Status};
 use zapadka_pg::execute::Runner;
 use zapadka_pg::{history, lock};
 
@@ -132,6 +132,19 @@ async fn verify_all(
             }
             Err(error) => {
                 let mut result = result_of(migration, Action::Verify, Status::Failed);
+                // The script that failed is named, with its hash. `verify.sql`
+                // is mutable, so "which bytes failed" is not answerable from
+                // the migration id alone.
+                if let Some(script) = &migration.verify {
+                    result.scripts.push(Script {
+                        role: ScriptRole::Verify,
+                        path: script.relative_path.clone(),
+                        sha256: script.sha256.clone(),
+                        status: Status::Failed,
+                        duration_ms: None,
+                        error: Some((&error).into()),
+                    });
+                }
                 result.error = Some((&error).into());
                 session.migrations.push(result);
                 return Err(error);

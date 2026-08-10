@@ -239,7 +239,21 @@ fn from_service(settings: &service::ServiceSettings, name: &str) -> Result<PgCon
 fn ssl_mode(value: &str, name: &str) -> Result<SslMode> {
     match value.to_lowercase().as_str() {
         "disable" => Ok(SslMode::Disable),
-        "allow" | "prefer" => Ok(SslMode::Prefer),
+        "prefer" => Ok(SslMode::Prefer),
+        // `allow` means "try plaintext first, then TLS", which is the opposite
+        // order to `prefer`. Mapping it to `prefer` would change which
+        // connection succeeds on a server that accepts plaintext but presents
+        // a certificate Zapadka cannot verify, so it is refused rather than
+        // quietly reinterpreted.
+        "allow" => Err(Error::new(
+            ErrorCode::TargetInvalid,
+            format!("service {name:?} sets sslmode=allow, which Zapadka does not implement"),
+        )
+        .with_hint(
+            "`allow` tries an unencrypted connection first and only then TLS; use `prefer` for \
+             TLS-first with a plaintext fallback, or `disable` to state that plaintext is \
+             intended",
+        )),
         // Zapadka verifies whenever it encrypts, so these collapse to one mode.
         "require" | "verify-ca" | "verify-full" => Ok(SslMode::Require),
         other => Err(Error::new(
@@ -439,6 +453,11 @@ mod tests {
         }
         assert_eq!(ssl_mode("disable", "s").unwrap(), SslMode::Disable);
         assert_eq!(ssl_mode("prefer", "s").unwrap(), SslMode::Prefer);
+        // `allow` inverts prefer's order and is refused rather than mismapped.
+        assert_eq!(
+            ssl_mode("allow", "s").unwrap_err().code,
+            ErrorCode::TargetInvalid
+        );
     }
 
     #[test]
