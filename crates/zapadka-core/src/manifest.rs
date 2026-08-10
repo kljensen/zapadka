@@ -178,7 +178,7 @@ impl Manifest {
                 format!("migration id {} is not a UUIDv7", self.id),
             )
             .at(Location::file(path))
-            .hint(
+            .with_hint(
                 "migration ids are UUIDv7 so that ties in the dependency graph break in creation \
                  order; let `zapadka new` generate them",
             ));
@@ -210,7 +210,7 @@ impl Manifest {
                     "an irreversible migration must state irreversible_reason",
                 )
                 .at(Location::file(path))
-                .hint("explain what makes this migration impossible to undo, such as dropping a column whose data is not recoverable"));
+                .with_hint("explain what makes this migration impossible to undo, such as dropping a column whose data is not recoverable"));
             }
             (Reversibility::Reversible, Some(_)) => {
                 return Err(Error::new(
@@ -218,7 +218,7 @@ impl Manifest {
                     "irreversible_reason is set on a reversible migration",
                 )
                 .at(Location::file(path))
-                .hint("remove irreversible_reason, or set reversibility = \"irreversible\""));
+                .with_hint("remove irreversible_reason, or set reversibility = \"irreversible\""));
             }
             _ => {}
         }
@@ -255,7 +255,7 @@ impl Manifest {
     /// This exact text is hashed into the deployment definition, so its format
     /// is a permanent compatibility contract. Any change to it invalidates
     /// every hash recorded in every existing registry and requires a new
-    /// [`CANONICAL_HEADER`] and a registry migration.
+    /// canonical header version and a registry migration.
     pub fn canonical_form(&self) -> String {
         format!(
             "{CANONICAL_HEADER}\nid={}\ntransaction={}\ndepends={}\n",
@@ -318,10 +318,12 @@ transaction = \"required\"
 /// Hex-encodes a byte slice.
 fn hex(bytes: &[u8]) -> String {
     use fmt::Write as _;
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
-        let _ = write!(out, "{byte:02x}");
-        out
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
 }
 
 /// Returns the lowercase hex SHA-256 of `bytes`.
@@ -343,6 +345,9 @@ fn line_and_column(text: &str, offset: usize) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
+    // Assertions and unreachable branches in tests panic by design.
+    #![allow(clippy::panic)]
+
     use super::*;
 
     const A: &str = "0198f5c0-0000-7000-8000-00000000000a";
@@ -380,9 +385,11 @@ mod tests {
     #[test]
     fn rejects_self_dependency_and_duplicate_edges() {
         assert_eq!(
-            parse(&format!("format_version = 1\nid = \"{A}\"\ndepends = [\"{A}\"]\n"))
-                .unwrap_err()
-                .code,
+            parse(&format!(
+                "format_version = 1\nid = \"{A}\"\ndepends = [\"{A}\"]\n"
+            ))
+            .unwrap_err()
+            .code,
             ErrorCode::GraphSelfDependency
         );
         assert_eq!(

@@ -710,6 +710,7 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "postgres-protocol",
+ "uuid",
 ]
 
 [[package]]
@@ -1636,8 +1637,10 @@ dependencies = [
  "camino",
  "clap",
  "serde_json",
+ "time",
  "tokio",
  "uuid",
+ "walkdir",
  "zapadka-core",
  "zapadka-parser",
  "zapadka-pg",
@@ -1654,10 +1657,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
- "time",
  "toml",
  "uuid",
- "walkdir",
  "zapadka-parser",
 ]
 
@@ -1666,7 +1667,6 @@ name = "zapadka-parser"
 version = "0.1.0"
 dependencies = [
  "cc",
- "serde",
  "serde_json",
  "thiserror",
 ]
@@ -1675,12 +1675,9 @@ dependencies = [
 name = "zapadka-pg"
 version = "0.1.0"
 dependencies = [
+ "camino",
  "rustls",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "thiserror",
- "time",
+ "sha2",
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",

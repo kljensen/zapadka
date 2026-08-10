@@ -149,7 +149,7 @@ pub fn read(root: &Utf8Path, dir: &Utf8Path) -> Result<Migration> {
             format!("{relative_dir} has no {MANIFEST_FILE_NAME}"),
         )
         .at(Location::file(&relative_dir))
-        .hint("every directory under migrations/ must be a migration package"));
+        .with_hint("every directory under migrations/ must be a migration package"));
     }
     let manifest_text = std::fs::read_to_string(&manifest_path)
         .map_err(|e| io_error(&relative_manifest, "read", e))?;
@@ -167,7 +167,7 @@ pub fn read(root: &Utf8Path, dir: &Utf8Path) -> Result<Migration> {
                 ),
             )
             .at(Location::file(&relative_manifest))
-            .hint(format!(
+            .with_hint(format!(
                 "rename the directory to {}-{}, or correct the id in {MANIFEST_FILE_NAME}",
                 manifest.id,
                 if slug.is_empty() { "slug" } else { &slug }
@@ -195,7 +195,7 @@ pub fn read(root: &Utf8Path, dir: &Utf8Path) -> Result<Migration> {
                 format!("{relative_dir} is declared reversible but has no revert.sql"),
             )
             .at(Location::file(&relative_manifest))
-            .hint(
+            .with_hint(
                 "write revert.sql, or declare reversibility = \"irreversible\" with a reason",
             ));
         }
@@ -205,7 +205,7 @@ pub fn read(root: &Utf8Path, dir: &Utf8Path) -> Result<Migration> {
                 format!("{relative_dir} is declared irreversible but has a revert.sql"),
             )
             .at(Location::file(&relative_manifest))
-            .hint("delete revert.sql, or declare reversibility = \"reversible\""));
+            .with_hint("delete revert.sql, or declare reversibility = \"reversible\""));
         }
         _ => {}
     }
@@ -234,12 +234,9 @@ fn read_script(root: &Utf8Path, dir: &Utf8Path, role: ScriptRole) -> Result<Opti
     let relative_path = relative(root, &path);
     let bytes = std::fs::read(&path).map_err(|e| io_error(&relative_path, "read", e))?;
     let sql = String::from_utf8(bytes.clone()).map_err(|_| {
-        Error::new(
-            ErrorCode::Io,
-            format!("{relative_path} is not valid UTF-8"),
-        )
-        .at(Location::file(&relative_path))
-        .hint("Zapadka sends SQL to PostgreSQL as UTF-8 text")
+        Error::new(ErrorCode::Io, format!("{relative_path} is not valid UTF-8"))
+            .at(Location::file(&relative_path))
+            .with_hint("Zapadka sends SQL to PostgreSQL as UTF-8 text")
     })?;
     Ok(Some(Script {
         role,
@@ -260,11 +257,12 @@ fn split_directory_name(name: &str) -> (Option<Uuid>, String) {
     // A hyphenated UUID is 36 characters and itself contains hyphens, so the
     // slug separator is the hyphen at exactly that offset.
     const UUID_LEN: usize = 36;
-    if name.len() > UUID_LEN && name.is_char_boundary(UUID_LEN) {
-        if let Ok(id) = Uuid::parse_str(&name[..UUID_LEN]) {
-            let rest = &name[UUID_LEN..];
-            return (Some(id), rest.strip_prefix('-').unwrap_or(rest).to_owned());
-        }
+    if name.len() > UUID_LEN
+        && name.is_char_boundary(UUID_LEN)
+        && let Ok(id) = Uuid::parse_str(&name[..UUID_LEN])
+    {
+        let rest = &name[UUID_LEN..];
+        return (Some(id), rest.strip_prefix('-').unwrap_or(rest).to_owned());
     }
     match Uuid::parse_str(name) {
         Ok(id) => (Some(id), String::new()),
@@ -288,7 +286,7 @@ fn check_for_duplicate_ids(migrations: &[Migration]) -> Result<()> {
                 "{}/{MANIFEST_FILE_NAME}",
                 migration.relative_dir
             )))
-            .hint(
+            .with_hint(
                 "a migration's id is permanent and unique; generate a new one with `zapadka new` \
                  rather than copying a directory",
             ));
@@ -314,6 +312,9 @@ fn relative(root: &Utf8Path, path: &Utf8Path) -> String {
 /// convention, not a security boundary — but it does keep a slug from escaping
 /// the migrations directory or colliding on case-insensitive filesystems.
 pub fn normalize_slug(input: &str) -> Result<String> {
+    /// Leaves room for the UUID prefix, the separator, and a filename inside.
+    const MAX_SLUG: usize = 80;
+
     let mut slug = String::with_capacity(input.len());
     let mut pending_separator = false;
     for character in input.chars() {
@@ -333,24 +334,34 @@ pub fn normalize_slug(input: &str) -> Result<String> {
             ErrorCode::ManifestInvalid,
             format!("slug {input:?} contains no letters or digits"),
         )
-        .hint("use a short name such as add-orders-table"));
+        .with_hint("use a short name such as add-orders-table"));
     }
 
-    // Leave room for the UUID prefix, the separator, and a filename inside.
-    const MAX_SLUG: usize = 80;
     slug.truncate(MAX_SLUG);
     Ok(slug.trim_end_matches('-').to_owned())
 }
 
 #[cfg(test)]
 mod tests {
+    // Assertions and unreachable branches in tests panic by design.
+    #![allow(clippy::panic)]
+
     use super::*;
 
     #[test]
     fn normalizes_slugs_people_type() {
-        assert_eq!(normalize_slug("add-orders-table").unwrap(), "add-orders-table");
-        assert_eq!(normalize_slug("Add Orders Table").unwrap(), "add-orders-table");
-        assert_eq!(normalize_slug("add_orders__table").unwrap(), "add-orders-table");
+        assert_eq!(
+            normalize_slug("add-orders-table").unwrap(),
+            "add-orders-table"
+        );
+        assert_eq!(
+            normalize_slug("Add Orders Table").unwrap(),
+            "add-orders-table"
+        );
+        assert_eq!(
+            normalize_slug("add_orders__table").unwrap(),
+            "add-orders-table"
+        );
         assert_eq!(normalize_slug("  spaced  out  ").unwrap(), "spaced-out");
         assert_eq!(normalize_slug("v2.1/orders").unwrap(), "v2-1-orders");
     }
@@ -361,7 +372,7 @@ mod tests {
         // slug can never name a directory outside migrations/.
         assert_eq!(normalize_slug("../../etc/passwd").unwrap(), "etc-passwd");
         assert_eq!(normalize_slug("a/../b").unwrap(), "a-b");
-        assert!(!normalize_slug("../..").is_ok());
+        assert!(normalize_slug("../..").is_err());
     }
 
     #[test]

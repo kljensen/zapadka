@@ -252,27 +252,40 @@ pub enum ExitCode {
 impl ExitCode {
     /// The numeric code to pass to the operating system.
     pub fn code(self) -> i32 {
-        self as u8 as i32
+        i32::from(self.code_u8())
+    }
+
+    /// The exit code as the byte the operating system actually receives.
+    pub fn code_u8(self) -> u8 {
+        self as u8
     }
 }
 
 /// A Zapadka failure.
+///
+/// Carries a stable code and a one-sentence message inline, and everything
+/// else — position, hint, `SQLSTATE`, detail, structured context — behind a
+/// single boxed allocation. Most errors have none of that, and every fallible
+/// function in Zapadka returns this type, so keeping it small keeps `Result`
+/// small everywhere.
 #[derive(Debug, Clone)]
 pub struct Error {
     /// The stable identifier for this failure.
     pub code: ErrorCode,
     /// A single sentence describing what went wrong, without a trailing period.
     pub message: String,
-    /// Where in the project the problem is, when it has a location.
-    pub location: Option<Location>,
-    /// What the author or operator should do about it.
-    pub hint: Option<String>,
-    /// The PostgreSQL `SQLSTATE`, when the failure came from the server.
-    pub sqlstate: Option<String>,
-    /// PostgreSQL's `DETAIL` field, when present.
-    pub detail: Option<String>,
-    /// Additional structured facts, rendered into the report as-is.
-    pub context: BTreeMap<String, String>,
+    /// Present only when the error carries more than a code and a message.
+    details: Option<Box<Details>>,
+}
+
+/// The parts of an error most errors do not have.
+#[derive(Debug, Clone, Default)]
+struct Details {
+    location: Option<Location>,
+    hint: Option<String>,
+    sqlstate: Option<String>,
+    detail: Option<String>,
+    context: BTreeMap<String, String>,
 }
 
 impl Error {
@@ -281,42 +294,81 @@ impl Error {
         Self {
             code,
             message: message.into(),
-            location: None,
-            hint: None,
-            sqlstate: None,
-            detail: None,
-            context: BTreeMap::new(),
+            details: None,
         }
     }
 
+    /// Returns the details, allocating them on first use.
+    fn details_mut(&mut self) -> &mut Details {
+        self.details.get_or_insert_with(Box::default)
+    }
+
     /// Attaches the file, and optionally line and column, the problem is at.
+    #[must_use]
     pub fn at(mut self, location: Location) -> Self {
-        self.location = Some(location);
+        self.details_mut().location = Some(location);
         self
     }
 
     /// Attaches guidance on how to resolve the failure.
-    pub fn hint(mut self, hint: impl Into<String>) -> Self {
-        self.hint = Some(hint.into());
+    #[must_use]
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.details_mut().hint = Some(hint.into());
         self
     }
 
     /// Attaches PostgreSQL's `SQLSTATE`.
-    pub fn sqlstate(mut self, sqlstate: impl Into<String>) -> Self {
-        self.sqlstate = Some(sqlstate.into());
+    #[must_use]
+    pub fn with_sqlstate(mut self, sqlstate: impl Into<String>) -> Self {
+        self.details_mut().sqlstate = Some(sqlstate.into());
         self
     }
 
     /// Attaches PostgreSQL's `DETAIL`.
-    pub fn detail(mut self, detail: impl Into<String>) -> Self {
-        self.detail = Some(detail.into());
+    #[must_use]
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.details_mut().detail = Some(detail.into());
         self
     }
 
     /// Attaches one structured fact, such as the conflicting hash.
-    pub fn with(mut self, key: impl Into<String>, value: impl fmt::Display) -> Self {
-        self.context.insert(key.into(), value.to_string());
+    #[must_use]
+    pub fn with_context(mut self, key: impl Into<String>, value: impl fmt::Display) -> Self {
+        self.details_mut()
+            .context
+            .insert(key.into(), value.to_string());
         self
+    }
+
+    /// Where in the project the problem is, when it has a location.
+    pub fn location(&self) -> Option<&Location> {
+        self.details.as_ref()?.location.as_ref()
+    }
+
+    /// What the author or operator should do about it.
+    pub fn hint(&self) -> Option<&str> {
+        self.details.as_ref()?.hint.as_deref()
+    }
+
+    /// The PostgreSQL `SQLSTATE`, when the failure came from the server.
+    pub fn sqlstate(&self) -> Option<&str> {
+        self.details.as_ref()?.sqlstate.as_deref()
+    }
+
+    /// PostgreSQL's `DETAIL` field, when present.
+    pub fn detail(&self) -> Option<&str> {
+        self.details.as_ref()?.detail.as_deref()
+    }
+
+    /// Additional structured facts, rendered into the report as-is.
+    pub fn context(&self) -> &BTreeMap<String, String> {
+        // A shared empty map, so callers need no special case for the common
+        // error that carries no context.
+        static EMPTY: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
+        match &self.details {
+            Some(details) => &details.context,
+            None => EMPTY.get_or_init(BTreeMap::new),
+        }
     }
 
     /// The process exit code for this failure.
@@ -340,12 +392,16 @@ pub type Result<T> = std::result::Result<T, Error>;
 ///
 /// Bare `io::Error` messages omit the path, which is the first thing a user
 /// needs in order to fix the problem.
+#[allow(clippy::needless_pass_by_value)] // takes ownership so callers cannot reuse a consumed error
 pub fn io_error(path: impl fmt::Display, action: &str, source: std::io::Error) -> Error {
     Error::new(ErrorCode::Io, format!("cannot {action} {path}: {source}"))
 }
 
 #[cfg(test)]
 mod tests {
+    // Assertions and unreachable branches in tests panic by design.
+    #![allow(clippy::panic)]
+
     use super::*;
 
     #[test]

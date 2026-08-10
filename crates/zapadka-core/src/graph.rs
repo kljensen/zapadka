@@ -58,7 +58,7 @@ impl Graph {
                         "{}/{MANIFEST_FILE_NAME}",
                         migration.relative_dir
                     )))
-                    .hint(
+                    .with_hint(
                         "the dependency was deleted or was never committed; restore it or remove \
                          the edge",
                     ));
@@ -211,7 +211,9 @@ impl Graph {
             .filter(|id| !placed.contains(id))
             .collect();
 
-        let cycle = self.find_cycle(&stuck).unwrap_or_else(|| stuck.iter().copied().collect());
+        let cycle = self
+            .find_cycle(&stuck)
+            .unwrap_or_else(|| stuck.iter().copied().collect());
         let described = cycle
             .iter()
             .map(|id| match self.migrations.get(id) {
@@ -233,7 +235,7 @@ impl Graph {
             format!("dependency cycle: {described} -> {}",
                 cycle.first().and_then(|id| self.migrations.get(id)).map_or_else(String::new, Migration::label)),
         )
-        .hint("remove one of these dependency edges; migrations cannot depend on each other in a loop");
+        .with_hint("remove one of these dependency edges; migrations cannot depend on each other in a loop");
         if let Some(location) = location {
             error = error.at(location);
         }
@@ -270,6 +272,9 @@ impl Graph {
 
 #[cfg(test)]
 mod tests {
+    // Assertions and unreachable branches in tests panic by design.
+    #![allow(clippy::panic)]
+
     use super::*;
     use crate::manifest::Manifest;
     use crate::migration::Script;
@@ -364,9 +369,24 @@ mod tests {
             migration(4, &[2, 3]),
         ]);
         for permutation in [
-            vec![migration(4, &[2, 3]), migration(3, &[1]), migration(2, &[1]), migration(1, &[])],
-            vec![migration(2, &[1]), migration(4, &[2, 3]), migration(1, &[]), migration(3, &[1])],
-            vec![migration(3, &[1]), migration(1, &[]), migration(4, &[2, 3]), migration(2, &[1])],
+            vec![
+                migration(4, &[2, 3]),
+                migration(3, &[1]),
+                migration(2, &[1]),
+                migration(1, &[]),
+            ],
+            vec![
+                migration(2, &[1]),
+                migration(4, &[2, 3]),
+                migration(1, &[]),
+                migration(3, &[1]),
+            ],
+            vec![
+                migration(3, &[1]),
+                migration(1, &[]),
+                migration(4, &[2, 3]),
+                migration(2, &[1]),
+            ],
         ] {
             assert_eq!(build(permutation), expected);
         }
@@ -407,7 +427,11 @@ mod tests {
     fn reports_a_missing_dependency_with_the_migration_that_wants_it() {
         let error = Graph::build(vec![migration(2, &[1])]).unwrap_err();
         assert_eq!(error.code, ErrorCode::MigrationUnknownDependency);
-        assert!(error.message.contains(&id(1).to_string()), "{}", error.message);
+        assert!(
+            error.message.contains(&id(1).to_string()),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

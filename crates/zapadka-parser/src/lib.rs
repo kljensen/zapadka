@@ -85,6 +85,7 @@ pub fn parser_version() -> u32 {
 }
 
 /// Renders a `PG_VERSION_NUM` as a human-readable version, e.g. `18.4`.
+#[derive(Debug, Clone, Copy)]
 pub struct ParserVersion(pub u32);
 
 impl fmt::Display for ParserVersion {
@@ -95,6 +96,9 @@ impl fmt::Display for ParserVersion {
 
 #[cfg(test)]
 mod tests {
+    // Assertions and unreachable branches in tests panic by design.
+    #![allow(clippy::panic)]
+
     use super::*;
 
     #[test]
@@ -120,6 +124,11 @@ mod tests {
     #[test]
     fn empty_and_comment_only_scripts_have_no_statements() {
         assert!(parse("").unwrap().statements.is_empty());
-        assert!(parse("-- nothing here\n/* or here */\n").unwrap().statements.is_empty());
+        assert!(
+            parse("-- nothing here\n/* or here */\n")
+                .unwrap()
+                .statements
+                .is_empty()
+        );
     }
 }

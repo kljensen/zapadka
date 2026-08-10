@@ -9,9 +9,11 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [build-dependencies]
 cc = "1.2"
+
+[lints]
+workspace = true

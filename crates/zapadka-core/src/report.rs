@@ -90,7 +90,9 @@ pub struct Run {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
+    /// The command did what it was asked to do.
     Success,
+    /// The command did not. `error` explains why.
     Failure,
 }
 
@@ -162,9 +164,13 @@ pub struct MigrationResult {
 pub enum Action {
     /// Selected for execution but not executed, as in `--dry-run` and `status`.
     Plan,
+    /// Applied the migration's `deploy.sql`.
     Deploy,
+    /// Ran the migration's `verify.sql` against committed state.
     Verify,
+    /// Applied the migration's `revert.sql`.
     Revert,
+    /// Recorded the migration as applied without running its SQL.
     Baseline,
 }
 
@@ -221,8 +227,11 @@ pub struct Script {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptRole {
+    /// `deploy.sql`, the immutable script that applies the migration.
     Deploy,
+    /// `revert.sql`, the mutable script that undoes it.
     Revert,
+    /// `verify.sql`, the mutable script that checks it, always rolled back.
     Verify,
 }
 
@@ -282,7 +291,9 @@ pub struct Assertion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AssertionStatus {
+    /// The assertion held.
     Passed,
+    /// The assertion did not hold, and it was not marked `TODO`.
     Failed,
     /// Failed, but marked `TODO`, so it does not fail the file.
     TodoFailed,
@@ -314,7 +325,9 @@ pub struct Diagnostic {
 }
 
 /// How seriously to take a diagnostic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
     /// Provably invalid. Always fails the command.
@@ -387,11 +400,11 @@ impl From<&Error> for ReportError {
         Self {
             code: error.code.as_str().to_owned(),
             message: error.message.clone(),
-            sqlstate: error.sqlstate.clone(),
-            detail: error.detail.clone(),
-            hint: error.hint.clone(),
-            location: error.location.clone(),
-            context: error.context.clone(),
+            sqlstate: error.sqlstate().map(str::to_owned),
+            detail: error.detail().map(str::to_owned),
+            hint: error.hint().map(str::to_owned),
+            location: error.location().cloned(),
+            context: error.context().clone(),
         }
     }
 }
@@ -441,6 +454,9 @@ impl ReportV1 {
 
 #[cfg(test)]
 mod tests {
+    // Assertions and unreachable branches in tests panic by design.
+    #![allow(clippy::panic)]
+
     use super::*;
 
     fn sample() -> ReportV1 {
@@ -449,7 +465,7 @@ mod tests {
             tool: Tool {
                 name: "zapadka".to_owned(),
                 version: "0.1.0".to_owned(),
-                parser_version: 180004,
+                parser_version: 180_004,
             },
             run: Run {
                 id: Uuid::nil(),
@@ -500,7 +516,9 @@ mod tests {
     fn failing_a_report_sets_a_nonzero_exit_code_and_the_cause() {
         use crate::error::{Error, ErrorCode};
         let mut report = sample();
-        report.fail(&Error::new(ErrorCode::GraphCycle, "dependency cycle").hint("break the cycle"));
+        report.fail(
+            &Error::new(ErrorCode::GraphCycle, "dependency cycle").with_hint("break the cycle"),
+        );
         assert_eq!(report.outcome, Outcome::Failure);
         assert_ne!(report.exit_code, 0);
         let error = report.error.unwrap();
@@ -510,9 +528,18 @@ mod tests {
 
     #[test]
     fn enum_values_serialize_as_stable_snake_case() {
-        assert_eq!(serde_json::to_string(&Outcome::Failure).unwrap(), "\"failure\"");
-        assert_eq!(serde_json::to_string(&Action::Deploy).unwrap(), "\"deploy\"");
-        assert_eq!(serde_json::to_string(&Status::Succeeded).unwrap(), "\"succeeded\"");
+        assert_eq!(
+            serde_json::to_string(&Outcome::Failure).unwrap(),
+            "\"failure\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Action::Deploy).unwrap(),
+            "\"deploy\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Status::Succeeded).unwrap(),
+            "\"succeeded\""
+        );
         assert_eq!(
             serde_json::to_string(&TransactionMode::Required).unwrap(),
             "\"required\""
@@ -521,7 +548,10 @@ mod tests {
             serde_json::to_string(&AssertionStatus::TodoFailed).unwrap(),
             "\"todo_failed\""
         );
-        assert_eq!(serde_json::to_string(&Severity::Warning).unwrap(), "\"warning\"");
+        assert_eq!(
+            serde_json::to_string(&Severity::Warning).unwrap(),
+            "\"warning\""
+        );
     }
 
     #[test]

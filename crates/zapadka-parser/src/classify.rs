@@ -44,34 +44,58 @@ impl Statement {
 pub enum StatementKind {
     /// Takes the transaction boundary away from the runner. Always rejected.
     TransactionControl(TransactionOperation),
+    /// Builds an index. Without `CONCURRENTLY` this blocks writes to the table
+    /// for the duration of the build.
     CreateIndex {
+        /// The table being indexed, when the statement named one.
         relation: Option<QualifiedName>,
+        /// Whether `CONCURRENTLY` was given, which PostgreSQL forbids inside a
+        /// transaction block.
         concurrent: bool,
+        /// Whether the index enforces uniqueness.
         unique: bool,
     },
+    /// Creates a table, which by definition has no existing rows to lock.
     CreateTable {
+        /// The table being created.
         relation: Option<QualifiedName>,
     },
+    /// Alters a table. The risk lives in the individual actions.
     AlterTable {
+        /// The table being altered.
         relation: Option<QualifiedName>,
+        /// The actions applied, in the order they were written.
         actions: Vec<AlterTableAction>,
     },
+    /// Removes an object.
     Drop {
+        /// What kind of object is being removed.
         object: DropObject,
+        /// Whether `CASCADE` extends the drop to dependent objects.
         cascade: bool,
+        /// Whether `CONCURRENTLY` was given, which applies to indexes and which
+        /// PostgreSQL forbids inside a transaction block.
         concurrent: bool,
     },
+    /// Removes every row from a table.
     Truncate {
+        /// Whether `CASCADE` extends the truncation to referencing tables.
         cascade: bool,
     },
     /// Renames an object, which breaks application code still using the old
     /// name.
     Rename {
+        /// What kind of object is being renamed.
         object: DropObject,
+        /// The new name.
         to: String,
     },
+    /// Reclaims storage. PostgreSQL forbids this inside a transaction block.
     Vacuum,
+    /// Rebuilds an index.
     Reindex {
+        /// Whether `CONCURRENTLY` was given, which PostgreSQL forbids inside a
+        /// transaction block.
         concurrent: bool,
     },
     /// Anything Zapadka has no specific opinion about.
@@ -111,16 +135,27 @@ impl StatementKind {
 /// The specific transaction-control operation a rejected statement performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransactionOperation {
+    /// `BEGIN` or `START TRANSACTION`.
     Begin,
+    /// `COMMIT` or `END`.
     Commit,
+    /// `ROLLBACK` or `ABORT`.
     Rollback,
+    /// `SAVEPOINT`.
     Savepoint,
+    /// `RELEASE SAVEPOINT`.
     ReleaseSavepoint,
+    /// `ROLLBACK TO SAVEPOINT`.
     RollbackToSavepoint,
+    /// `PREPARE TRANSACTION`, which begins two-phase commit.
     PrepareTransaction,
+    /// `COMMIT PREPARED`.
     CommitPrepared,
+    /// `ROLLBACK PREPARED`.
     RollbackPrepared,
+    /// `SET TRANSACTION`, which changes properties of the runner's transaction.
     SetTransaction,
+    /// `SET SESSION CHARACTERISTICS AS TRANSACTION`.
     SetSessionCharacteristics,
 }
 
@@ -146,7 +181,9 @@ impl TransactionOperation {
 /// A possibly schema-qualified relation name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QualifiedName {
+    /// The schema, when the name was qualified with one.
     pub schema: Option<String>,
+    /// The object's own name.
     pub name: String,
 }
 
@@ -162,13 +199,21 @@ impl std::fmt::Display for QualifiedName {
 /// The kind of object a `DROP` statement removes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DropObject {
+    /// A table, which holds rows.
     Table,
+    /// An index, which can be rebuilt from the table.
     Index,
+    /// A view, which holds no data of its own.
     View,
+    /// A materialized view, which does hold data.
     MaterializedView,
+    /// A sequence, whose current value cannot be recovered once dropped.
     Sequence,
+    /// A schema, and by extension everything in it.
     Schema,
+    /// A single column of a table.
     Column,
+    /// Any other object type, named as PostgreSQL spells it.
     Other(String),
 }
 
@@ -200,44 +245,67 @@ impl DropObject {
 /// A single action within an `ALTER TABLE` statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlterTableAction {
+    /// Removes a column and the data in it.
     DropColumn {
+        /// The column being removed.
         name: String,
+        /// Whether `CASCADE` extends the drop to dependent objects.
         cascade: bool,
     },
+    /// Adds a column.
     AddColumn {
+        /// The column being added.
         name: String,
+        /// Whether the column is declared `NOT NULL`.
         not_null: bool,
         /// Whether the column's `DEFAULT` calls a function. Zapadka cannot know
         /// whether that function is volatile without the catalog, so callers
         /// must treat this as "possibly rewrites the table", not a certainty.
         default_calls_function: bool,
     },
+    /// Changes a column's type, which usually rewrites the whole table.
     AlterColumnType {
+        /// The column whose type is changing.
         name: String,
     },
+    /// Marks a column `NOT NULL`, which scans every existing row.
     SetNotNull {
+        /// The column being constrained.
         name: String,
     },
+    /// Adds a table constraint.
     AddConstraint {
+        /// What kind of constraint is being added.
         kind: ConstraintKind,
         /// `NOT VALID` defers the scan of existing rows.
         not_valid: bool,
     },
+    /// Validates a constraint previously added `NOT VALID`, taking a weaker
+    /// lock than adding it validated would have.
     ValidateConstraint {
+        /// The constraint being validated.
         name: String,
     },
+    /// Any other action, named as PostgreSQL spells its parse-tree subtype.
     Other(String),
 }
 
 /// The kind of constraint an `ALTER TABLE ... ADD CONSTRAINT` adds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConstraintKind {
+    /// `PRIMARY KEY`.
     PrimaryKey,
+    /// `UNIQUE`.
     Unique,
+    /// `REFERENCES`, which also locks the referenced table.
     ForeignKey,
+    /// `CHECK`.
     Check,
+    /// `NOT NULL` written as a table constraint.
     NotNull,
+    /// `EXCLUDE`, which is backed by an index.
     Exclusion,
+    /// Any other constraint type, named as PostgreSQL spells it.
     Other(String),
 }
 
@@ -270,10 +338,13 @@ pub(crate) fn classify(tree: &str, script: &str) -> ParsedScript {
     // The tree came straight from `pg_query_parse`, which emits well-formed
     // JSON; a malformed tree degrades to "no statements" rather than panicking.
     let root: Value = serde_json::from_str(tree).unwrap_or(Value::Null);
+    // A PG_VERSION_NUM never approaches u32::MAX; a value that did would mean
+    // the tree is not a parse tree, so reporting 0 is the honest answer.
     let parser_version = root
         .get("version")
         .and_then(Value::as_u64)
-        .unwrap_or_default() as u32;
+        .and_then(|version| u32::try_from(version).ok())
+        .unwrap_or_default();
 
     let line_index = LineIndex::new(script);
     let statements = root
@@ -296,11 +367,19 @@ fn statement(raw: &Value, lines: &LineIndex) -> Option<Statement> {
     // Every statement node is a single-key object keyed by its node type.
     let (node_type, body) = node.iter().next()?;
     // Upstream omits `stmt_location` for the first statement in a script.
+    // Offsets index the script that was just parsed, so they fit in a usize on
+    // any target that could hold that script in memory; a value that did not is
+    // not an offset, and treating it as "unknown" is better than truncating it
+    // into a position that points somewhere real but wrong.
     let location = raw
         .get("stmt_location")
         .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
-    let length = raw.get("stmt_len").and_then(Value::as_u64).map(|n| n as usize);
+        .and_then(|offset| usize::try_from(offset).ok())
+        .unwrap_or(0);
+    let length = raw
+        .get("stmt_len")
+        .and_then(Value::as_u64)
+        .and_then(|length| usize::try_from(length).ok());
 
     Some(Statement {
         kind: kind(node_type, body),
@@ -324,9 +403,9 @@ fn kind(node_type: &str, body: &Value) -> StatementKind {
             Some("TRANSACTION") => {
                 StatementKind::TransactionControl(TransactionOperation::SetTransaction)
             }
-            Some("SESSION CHARACTERISTICS") => StatementKind::TransactionControl(
-                TransactionOperation::SetSessionCharacteristics,
-            ),
+            Some("SESSION CHARACTERISTICS") => {
+                StatementKind::TransactionControl(TransactionOperation::SetSessionCharacteristics)
+            }
             _ => StatementKind::Other,
         },
         "IndexStmt" => StatementKind::CreateIndex {
@@ -372,6 +451,10 @@ fn kind(node_type: &str, body: &Value) -> StatementKind {
     }
 }
 
+// Several PostgreSQL keywords are synonyms. Listing them on separate arms
+// documents the grammar Zapadka is matching, which is worth more than the
+// shorter match clippy would prefer.
+#[allow(clippy::match_same_arms)]
 fn transaction_operation(body: &Value) -> Option<TransactionOperation> {
     Some(match string(body, "kind")?.as_str() {
         "TRANS_STMT_BEGIN" | "TRANS_STMT_START" => TransactionOperation::Begin,
@@ -440,9 +523,7 @@ fn alter_table_action(cmd: &Value) -> AlterTableAction {
         "AT_AddConstraint" => {
             let constraint = cmd.get("def").and_then(|def| def.get("Constraint"));
             AlterTableAction::AddConstraint {
-                kind: constraint_kind(
-                    constraint.and_then(|c| string(c, "contype")).as_deref(),
-                ),
+                kind: constraint_kind(constraint.and_then(|c| string(c, "contype")).as_deref()),
                 // `NOT VALID` is represented as `skip_validation`.
                 not_valid: constraint.is_some_and(|c| flag(c, "skip_validation")),
             }
@@ -521,6 +602,7 @@ fn string(value: &Value, key: &str) -> Option<String> {
 }
 
 /// Precomputed newline offsets for mapping byte offsets to line numbers.
+#[derive(Debug)]
 struct LineIndex {
     newlines: Vec<usize>,
 }
@@ -545,6 +627,9 @@ impl LineIndex {
 
 #[cfg(test)]
 mod tests {
+    // Assertions and unreachable branches in tests panic by design.
+    #![allow(clippy::panic)]
+
     use crate::{StatementKind, TransactionOperation, parse};
 
     fn kinds(sql: &str) -> Vec<StatementKind> {
@@ -566,11 +651,23 @@ mod tests {
             ("ROLLBACK", TransactionOperation::Rollback),
             ("ABORT", TransactionOperation::Rollback),
             ("SAVEPOINT s", TransactionOperation::Savepoint),
-            ("RELEASE SAVEPOINT s", TransactionOperation::ReleaseSavepoint),
-            ("ROLLBACK TO SAVEPOINT s", TransactionOperation::RollbackToSavepoint),
-            ("PREPARE TRANSACTION 'x'", TransactionOperation::PrepareTransaction),
+            (
+                "RELEASE SAVEPOINT s",
+                TransactionOperation::ReleaseSavepoint,
+            ),
+            (
+                "ROLLBACK TO SAVEPOINT s",
+                TransactionOperation::RollbackToSavepoint,
+            ),
+            (
+                "PREPARE TRANSACTION 'x'",
+                TransactionOperation::PrepareTransaction,
+            ),
             ("COMMIT PREPARED 'x'", TransactionOperation::CommitPrepared),
-            ("ROLLBACK PREPARED 'x'", TransactionOperation::RollbackPrepared),
+            (
+                "ROLLBACK PREPARED 'x'",
+                TransactionOperation::RollbackPrepared,
+            ),
             (
                 "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
                 TransactionOperation::SetTransaction,
@@ -593,7 +690,10 @@ mod tests {
     fn ordinary_set_is_not_transaction_control() {
         // Targets may configure `lock_timeout`; only transaction properties are
         // reserved to the runner.
-        assert_eq!(kinds("SET LOCAL lock_timeout = '5s'"), vec![StatementKind::Other]);
+        assert_eq!(
+            kinds("SET LOCAL lock_timeout = '5s'"),
+            vec![StatementKind::Other]
+        );
         assert_eq!(kinds("SET search_path = app"), vec![StatementKind::Other]);
     }
 
@@ -604,7 +704,10 @@ mod tests {
         assert_eq!(offenders.len(), 1);
         assert_eq!(offenders[0].line, 3);
         // Upstream statement lengths exclude the terminating semicolon.
-        assert_eq!(offenders[0].text("CREATE TABLE t(i int);\n\nCOMMIT;\n"), "COMMIT");
+        assert_eq!(
+            offenders[0].text("CREATE TABLE t(i int);\n\nCOMMIT;\n"),
+            "COMMIT"
+        );
     }
 
     #[test]
@@ -639,7 +742,9 @@ mod tests {
                     name: "a".to_owned(),
                     cascade: true
                 },
-                AlterTableAction::AlterColumnType { name: "b".to_owned() },
+                AlterTableAction::AlterColumnType {
+                    name: "b".to_owned()
+                },
                 AlterTableAction::AddConstraint {
                     kind: ConstraintKind::Check,
                     not_valid: true
@@ -692,7 +797,10 @@ mod tests {
                 concurrent: true,
             }]
         );
-        assert_eq!(kinds("TRUNCATE t CASCADE"), vec![StatementKind::Truncate { cascade: true }]);
+        assert_eq!(
+            kinds("TRUNCATE t CASCADE"),
+            vec![StatementKind::Truncate { cascade: true }]
+        );
     }
 
     #[test]
@@ -757,7 +865,10 @@ mod tests {
     #[test]
     fn unknown_statements_do_not_become_transaction_control() {
         // Zapadka must not reject SQL simply because this module has no opinion.
-        assert_eq!(kinds("CREATE EXTENSION IF NOT EXISTS pgcrypto"), vec![StatementKind::Other]);
+        assert_eq!(
+            kinds("CREATE EXTENSION IF NOT EXISTS pgcrypto"),
+            vec![StatementKind::Other]
+        );
         assert_eq!(kinds("ANALYZE t"), vec![StatementKind::Other]);
     }
 }

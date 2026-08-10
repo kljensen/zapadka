@@ -174,7 +174,7 @@ impl LoadedConfig {
             };
             Error::new(ErrorCode::TargetUnknown, format!("unknown target {name:?}"))
                 .at(Location::file(CONFIG_FILE_NAME))
-                .hint(hint)
+                .with_hint(hint)
         })
     }
 }
@@ -185,7 +185,10 @@ impl Config {
         let config: Config = toml::from_str(text).map_err(|error| {
             let mut zapadka = Error::new(
                 ErrorCode::ConfigInvalid,
-                format!("{CONFIG_FILE_NAME} is not valid: {}", first_line(&error.to_string())),
+                format!(
+                    "{CONFIG_FILE_NAME} is not valid: {}",
+                    first_line(&error.to_string())
+                ),
             );
             if let Some(span) = error.span() {
                 let (line, column) = line_and_column(text, span.start);
@@ -193,7 +196,7 @@ impl Config {
             } else {
                 zapadka = zapadka.at(Location::file(CONFIG_FILE_NAME));
             }
-            zapadka.hint(credential_hint(&error.to_string()))
+            zapadka.with_hint(credential_hint(&error.to_string()))
         })?;
         config.validate()?;
         Ok(config)
@@ -210,7 +213,7 @@ impl Config {
                 ),
             )
             .at(Location::file(CONFIG_FILE_NAME))
-            .hint(if self.format_version > CONFIG_FORMAT_VERSION {
+            .with_hint(if self.format_version > CONFIG_FORMAT_VERSION {
                 "this project was written by a newer Zapadka; upgrade the binary"
             } else {
                 "migrate the file to the current format"
@@ -234,7 +237,7 @@ impl Config {
                     ),
                 )
                 .at(Location::file(CONFIG_FILE_NAME))
-                .hint("keep exactly one connection source per target"));
+                .with_hint("keep exactly one connection source per target"));
             }
         }
 
@@ -294,7 +297,7 @@ pub fn load_from(start: &Utf8Path) -> Result<LoadedConfig> {
             ErrorCode::ConfigNotFound,
             format!("no {CONFIG_FILE_NAME} found in {start} or any parent directory"),
         )
-        .hint("run `zapadka init` to create a project here")
+        .with_hint("run `zapadka init` to create a project here")
     })?;
     let path = root.join(CONFIG_FILE_NAME);
     let text = std::fs::read_to_string(&path).map_err(|e| io_error(&path, "read", e))?;
@@ -343,14 +346,15 @@ fn line_and_column(text: &str, offset: usize) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
+    // Assertions and unreachable branches in tests panic by design.
+    #![allow(clippy::panic)]
+
     use super::*;
 
     const PROJECT_ID: &str = "0198f5c0-0000-7000-8000-000000000001";
 
     fn minimal() -> String {
-        format!(
-            "format_version = 1\n[project]\nid = \"{PROJECT_ID}\"\n"
-        )
+        format!("format_version = 1\n[project]\nid = \"{PROJECT_ID}\"\n")
     }
 
     #[test]
@@ -391,7 +395,7 @@ mod tests {
         ))
         .unwrap_err();
         assert_eq!(error.code, ErrorCode::ConfigInvalid);
-        let hint = error.hint.unwrap();
+        let hint = error.hint().unwrap();
         assert!(hint.contains("pg_service"), "{hint}");
         assert!(hint.contains("uri_env"), "{hint}");
     }
@@ -408,18 +412,19 @@ mod tests {
 
     #[test]
     fn refuses_a_newer_format_version_and_says_to_upgrade() {
-        let error =
-            Config::parse(&format!("format_version = 2\n[project]\nid = \"{PROJECT_ID}\"\n"))
-                .unwrap_err();
+        let error = Config::parse(&format!(
+            "format_version = 2\n[project]\nid = \"{PROJECT_ID}\"\n"
+        ))
+        .unwrap_err();
         assert_eq!(error.code, ErrorCode::ConfigUnsupportedFormatVersion);
-        assert!(error.hint.unwrap().contains("upgrade"));
+        assert!(error.hint().unwrap().contains("upgrade"));
     }
 
     #[test]
     fn reports_the_line_of_a_syntax_error() {
         let error = Config::parse("format_version = 1\n[project\nid = \"x\"\n").unwrap_err();
         assert_eq!(error.code, ErrorCode::ConfigInvalid);
-        let location = error.location.expect("syntax errors carry a location");
+        let location = error.location().expect("syntax errors carry a location");
         assert_eq!(location.path, CONFIG_FILE_NAME);
         assert_eq!(location.line, Some(2));
     }
@@ -427,8 +432,11 @@ mod tests {
     #[test]
     fn unknown_keys_are_rejected_rather_than_silently_ignored() {
         // A typo in a safety-relevant key must not look like it took effect.
-        let error = Config::parse(&format!("{}\n[policy]\nadvisory_lock_timout = \"5s\"\n", minimal()))
-            .unwrap_err();
+        let error = Config::parse(&format!(
+            "{}\n[policy]\nadvisory_lock_timout = \"5s\"\n",
+            minimal()
+        ))
+        .unwrap_err();
         assert_eq!(error.code, ErrorCode::ConfigInvalid);
     }
 
@@ -453,6 +461,6 @@ mod tests {
         };
         let error = loaded.target("staging").unwrap_err();
         assert_eq!(error.code, ErrorCode::TargetUnknown);
-        assert!(error.hint.unwrap().contains("production"));
+        assert!(error.hint().unwrap().contains("production"));
     }
 }

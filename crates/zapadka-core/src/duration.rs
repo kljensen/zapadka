@@ -14,7 +14,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 ///
 /// Zero means "no timeout", matching PostgreSQL's own convention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, JsonSchema)]
-#[schemars(with = "String", description = "A duration such as \"5s\", \"500ms\", or \"0\".")]
+#[schemars(
+    with = "String",
+    description = "A duration such as \"5s\", \"500ms\", or \"0\"."
+)]
 pub struct Timeout {
     milliseconds: u64,
 }
@@ -133,6 +136,9 @@ impl<'de> Deserialize<'de> for Timeout {
 
 #[cfg(test)]
 mod tests {
+    // Assertions and unreachable branches in tests panic by design.
+    #![allow(clippy::panic)]
+
     use super::*;
 
     #[test]

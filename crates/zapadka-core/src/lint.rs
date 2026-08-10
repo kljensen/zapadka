@@ -143,7 +143,7 @@ pub fn check_migration(
                 "{}/migration.toml",
                 migration.relative_dir
             )))
-            .hint(
+            .with_hint(
                 "this alpha deploys transactional migrations only; nontransactional execution and \
                  its recovery workflow ship in a later release",
             ),
@@ -200,7 +200,7 @@ fn check_script(
                     error.line,
                     error.column,
                 ))
-                .hint("PostgreSQL could not parse this script, so Zapadka will not send it"),
+                .with_hint("PostgreSQL could not parse this script, so Zapadka will not send it"),
             );
             return;
         }
@@ -227,7 +227,7 @@ fn check_transaction_control(script: &Script, parsed: &ParsedScript, findings: &
                 ),
             )
             .at(Location::at(&script.relative_path, statement.line, 1))
-            .hint(transaction_control_hint(operation)),
+            .with_hint(transaction_control_hint(operation)),
         );
     }
 }
@@ -282,7 +282,7 @@ fn check_execution_mode(
                         ),
                     )
                     .at(Location::at(&script.relative_path, statement.line, 1))
-                    .hint(format!(
+                    .with_hint(format!(
                         "move {construct} into its own migration with transaction = \"forbidden\""
                     )),
                 );
@@ -303,7 +303,7 @@ fn check_execution_mode(
                         ),
                     )
                     .at(Location::file(&script.relative_path))
-                    .hint(
+                    .with_hint(
                         "a nontransactional migration runs exactly one statement, so that an \
                          interrupted run has only one possible outcome to resolve",
                     ),
@@ -331,7 +331,9 @@ fn collect_warnings(
     for statement in &parsed.statements {
         let line = Some(statement.line);
         match &statement.kind {
-            StatementKind::Drop { object, cascade, .. } if object.is_data_bearing() => {
+            StatementKind::Drop {
+                object, cascade, ..
+            } if object.is_data_bearing() => {
                 let cascade_note = if *cascade {
                     ", and CASCADE extends that to every dependent object"
                 } else {
@@ -443,13 +445,18 @@ fn warn_alter_table(
             not_valid: false,
         } if kind.scans_existing_rows() => (
             codes::CONSTRAINT_SCANS_TABLE,
-            format!("adds a {} constraint that validates existing rows", kind.label()),
+            format!(
+                "adds a {} constraint that validates existing rows",
+                kind.label()
+            ),
             match kind {
                 ConstraintKind::PrimaryKey | ConstraintKind::Unique => {
                     "build the index CONCURRENTLY first, then add the constraint USING that index"
                 }
-                _ => "add it NOT VALID, then VALIDATE CONSTRAINT in a separate migration, which \
-                      takes a weaker lock",
+                _ => {
+                    "add it NOT VALID, then VALIDATE CONSTRAINT in a separate migration, which \
+                      takes a weaker lock"
+                }
             },
         ),
         _ => return,
@@ -517,8 +524,8 @@ pub fn apply_policy(findings: &mut Findings) {
         .filter(|diagnostic| diagnostic.severity == Severity::Error)
         .map(|diagnostic| {
             let mut error = Error::new(ErrorCode::LintFailed, diagnostic.message.clone())
-                .with("lint", &diagnostic.code)
-                .hint(format!(
+                .with_context("lint", &diagnostic.code)
+                .with_hint(format!(
                     "{} is denied by policy in zapadka.toml; fix it, or accept it in this \
                      migration with an [[allow]] entry that states a reason",
                     diagnostic.code
@@ -534,6 +541,9 @@ pub fn apply_policy(findings: &mut Findings) {
 
 #[cfg(test)]
 mod tests {
+    // Assertions and unreachable branches in tests panic by design.
+    #![allow(clippy::panic)]
+
     use super::*;
     use crate::manifest::Manifest;
     use camino::Utf8PathBuf;
@@ -568,13 +578,22 @@ mod tests {
     }
 
     fn lint(deploy: &str) -> Findings {
-        lint_with("reversibility = \"irreversible\"\nirreversible_reason = \"test\"\n", deploy, &Policy::default())
+        lint_with(
+            "reversibility = \"irreversible\"\nirreversible_reason = \"test\"\n",
+            deploy,
+            &Policy::default(),
+        )
     }
 
     fn lint_with(manifest_extra: &str, deploy: &str, policy: &Policy) -> Findings {
         let migration = build(manifest_extra, deploy);
         let mut findings = Findings::default();
-        check_migration(&migration, policy, Capabilities::TRANSACTIONAL_ONLY, &mut findings);
+        check_migration(
+            &migration,
+            policy,
+            Capabilities::TRANSACTIONAL_ONLY,
+            &mut findings,
+        );
         apply_policy(&mut findings);
         findings
     }
@@ -591,7 +610,11 @@ mod tests {
     fn ordinary_ddl_produces_no_findings() {
         let findings = lint("CREATE TABLE app.orders (id bigint PRIMARY KEY, total numeric);");
         assert!(!findings.has_errors(), "{:?}", findings.errors);
-        assert!(findings.diagnostics.is_empty(), "{:?}", findings.diagnostics);
+        assert!(
+            findings.diagnostics.is_empty(),
+            "{:?}",
+            findings.diagnostics
+        );
     }
 
     #[test]
@@ -599,8 +622,8 @@ mod tests {
         let findings = lint("CREATE TABLE t(i int);\nCOMMIT;");
         let error = findings.first_error().unwrap();
         assert_eq!(error.code, ErrorCode::ScriptTransactionControl);
-        assert_eq!(error.location.as_ref().unwrap().line, Some(2));
-        assert!(error.hint.as_ref().unwrap().contains("commits"));
+        assert_eq!(error.location().unwrap().line, Some(2));
+        assert!(error.hint().unwrap().contains("commits"));
     }
 
     #[test]
@@ -608,7 +631,7 @@ mod tests {
         let findings = lint("CREATE TABLE t(i int);\nSELECT 1 FROM;");
         let error = findings.first_error().unwrap();
         assert_eq!(error.code, ErrorCode::ScriptParseError);
-        assert_eq!(error.location.as_ref().unwrap().line, Some(2));
+        assert_eq!(error.location().unwrap().line, Some(2));
         // Nothing else is claimed about a script that does not parse.
         assert_eq!(findings.errors.len(), 1);
     }
@@ -620,7 +643,7 @@ mod tests {
         let findings = lint("CREATE INDEX CONCURRENTLY i ON t (c);");
         let error = findings.first_error().unwrap();
         assert_eq!(error.code, ErrorCode::ScriptStatementCount);
-        assert!(error.hint.as_ref().unwrap().contains("forbidden"));
+        assert!(error.hint().unwrap().contains("forbidden"));
     }
 
     #[test]
@@ -643,7 +666,12 @@ mod tests {
             "transaction = \"forbidden\"\nreversibility = \"irreversible\"\nirreversible_reason = \"t\"\n",
             "CREATE INDEX CONCURRENTLY a ON t (c);\nCREATE INDEX CONCURRENTLY b ON t (d);",
         );
-        check_migration(&migration, &Policy::default(), Capabilities::ALL, &mut findings);
+        check_migration(
+            &migration,
+            &Policy::default(),
+            Capabilities::ALL,
+            &mut findings,
+        );
         let error = findings.first_error().unwrap();
         assert_eq!(error.code, ErrorCode::ScriptStatementCount);
         assert!(error.message.contains('2'), "{}", error.message);
@@ -655,18 +683,30 @@ mod tests {
             ("DROP TABLE t;", codes::DESTRUCTIVE),
             ("TRUNCATE t;", codes::DESTRUCTIVE),
             ("ALTER TABLE t DROP COLUMN c;", codes::DESTRUCTIVE),
-            ("CREATE INDEX i ON t (c);", codes::INDEX_WITHOUT_CONCURRENTLY),
-            ("ALTER TABLE t ALTER COLUMN c TYPE bigint;", codes::TABLE_REWRITE),
+            (
+                "CREATE INDEX i ON t (c);",
+                codes::INDEX_WITHOUT_CONCURRENTLY,
+            ),
+            (
+                "ALTER TABLE t ALTER COLUMN c TYPE bigint;",
+                codes::TABLE_REWRITE,
+            ),
             (
                 "ALTER TABLE t ADD COLUMN c timestamptz DEFAULT now();",
                 codes::TABLE_REWRITE,
             ),
-            ("ALTER TABLE t ALTER COLUMN c SET NOT NULL;", codes::CONSTRAINT_SCANS_TABLE),
+            (
+                "ALTER TABLE t ALTER COLUMN c SET NOT NULL;",
+                codes::CONSTRAINT_SCANS_TABLE,
+            ),
             (
                 "ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (c) REFERENCES u(id);",
                 codes::CONSTRAINT_SCANS_TABLE,
             ),
-            ("ALTER TABLE t RENAME COLUMN a TO b;", codes::COMPATIBILITY_WINDOW),
+            (
+                "ALTER TABLE t RENAME COLUMN a TO b;",
+                codes::COMPATIBILITY_WINDOW,
+            ),
         ] {
             let findings = lint(sql);
             assert!(!findings.has_errors(), "{sql} should warn, not fail");
@@ -688,7 +728,11 @@ mod tests {
         ] {
             let findings = lint(sql);
             assert!(!findings.has_errors(), "{sql}: {:?}", findings.errors);
-            assert!(findings.diagnostics.is_empty(), "{sql}: {:?}", findings.diagnostics);
+            assert!(
+                findings.diagnostics.is_empty(),
+                "{sql}: {:?}",
+                findings.diagnostics
+            );
         }
     }
 
@@ -706,7 +750,10 @@ mod tests {
         assert!(findings.has_errors());
         let error = findings.first_error().unwrap();
         assert_eq!(error.code, ErrorCode::LintFailed);
-        assert_eq!(error.context.get("lint").map(String::as_str), Some(codes::DESTRUCTIVE));
+        assert_eq!(
+            error.context().get("lint").map(String::as_str),
+            Some(codes::DESTRUCTIVE)
+        );
     }
 
     #[test]
@@ -726,7 +773,11 @@ mod tests {
         assert!(!findings.has_errors(), "{:?}", findings.errors);
         let diagnostic = &findings.diagnostics[0];
         assert_eq!(diagnostic.severity, Severity::Note);
-        assert!(diagnostic.message.contains("unused since v4"), "{}", diagnostic.message);
+        assert!(
+            diagnostic.message.contains("unused since v4"),
+            "{}",
+            diagnostic.message
+        );
     }
 
     #[test]
@@ -753,9 +804,18 @@ mod tests {
         });
 
         let mut findings = Findings::default();
-        check_migration(&migration, &Policy::default(), Capabilities::ALL, &mut findings);
+        check_migration(
+            &migration,
+            &Policy::default(),
+            Capabilities::ALL,
+            &mut findings,
+        );
 
-        assert!(findings.diagnostics.is_empty(), "{:?}", findings.diagnostics);
+        assert!(
+            findings.diagnostics.is_empty(),
+            "{:?}",
+            findings.diagnostics
+        );
         // But transaction control in verify.sql is still rejected.
         assert_eq!(
             findings.first_error().unwrap().code,

@@ -4,6 +4,9 @@
 //! The file list mirrors the upstream `Makefile` `SRC_FILES` variable exactly so
 //! that no vendored file needs local modification. See
 //! `third_party/libpg_query/PROVENANCE.toml` for the pinned release.
+// Panicking is how a build script reports a problem: there is no report to
+// write and no run to abandon.
+#![allow(clippy::panic)]
 
 use std::path::{Path, PathBuf};
 

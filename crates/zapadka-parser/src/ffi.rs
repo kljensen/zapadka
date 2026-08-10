@@ -2,6 +2,11 @@
 //!
 //! Only [`parse_to_json`] is exposed to the rest of the crate; every raw
 //! pointer is freed before it returns.
+//!
+//! This is the only module in Zapadka permitted to use `unsafe`. The workspace
+//! denies it everywhere else, so this opt-in is the complete list of places
+//! where memory safety rests on review rather than on the compiler.
+#![allow(unsafe_code)]
 
 use std::ffi::{CStr, CString, c_char, c_int};
 
@@ -70,7 +75,9 @@ pub(crate) fn parse_to_json(sql: &str) -> Result<String, ParseError> {
         };
         // `cursorpos` is 1-based and 0 means "no position"; `lineno` refers to
         // the parser's own C source and is deliberately ignored.
-        let offset = (error.cursorpos > 0).then(|| error.cursorpos as usize - 1);
+        let offset = usize::try_from(error.cursorpos)
+            .ok()
+            .and_then(|position| position.checked_sub(1));
         let (line, column) = match offset {
             Some(offset) => line_and_column(sql, offset),
             None => (1, 1),
@@ -106,6 +113,9 @@ fn line_and_column(text: &str, offset: usize) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
+    // Assertions and unreachable branches in tests panic by design.
+    #![allow(clippy::panic)]
+
     use super::*;
 
     #[test]
