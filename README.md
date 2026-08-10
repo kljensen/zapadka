@@ -47,8 +47,8 @@ is a new migration, which leaves both facts in the history.
 **Verification is separate from testing.** `verify.sql` is plain,
 production-safe SQL that runs after its migration commits, in a fresh
 **read-only** transaction that is always rolled back. It observes committed
-state and cannot leave anything behind. Database tests are a separate command
-against an explicit test target.
+state and cannot change it. Database tests are a separate command against an
+explicit test target.
 
 Read-only as well as rolled back, because rollback alone is not enough:
 PostgreSQL does not roll back `nextval()`, so a verification script that touched
@@ -171,6 +171,14 @@ cannot verify is refused rather than trusted. Supply a private CA with
 `sslrootcert`. Running unencrypted is supported and normal on a private network,
 but Zapadka says so in the report unless the target asked for it with
 `sslmode=disable`.
+
+**Connect as a role that owns the schema and nothing more.** Zapadka's scripts
+are your SQL, run with your privileges; the runner decides *when* and *in what
+transaction* they run, not what the server will let them do. A role holding
+`SUPERUSER`, `pg_execute_server_program`, or `pg_write_server_files` can reach
+outside the database — `COPY ... TO PROGRAM`, an untrusted-language function
+writing a file — and no transaction, read-only or otherwise, rolls that back.
+Zapadka does not deploy as a superuser, and neither should you.
 
 ## Requirements
 

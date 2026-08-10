@@ -14,9 +14,18 @@
 //! itself pass.
 //!
 //! Read-only as well as rolled back, because rollback alone is not enough:
-//! `nextval()` is not rolled back, and neither is anything a function does
-//! outside the database. The read-only transaction refuses those attempts
-//! rather than discovering afterwards that they persisted.
+//! `nextval()` is not rolled back, so a script that touched a sequence would
+//! advance it permanently. `READ ONLY` refuses the write where it is attempted
+//! instead of discovering afterwards that it persisted.
+//!
+//! That covers every change to the database's committed state and stops exactly
+//! there. PostgreSQL applies `READ ONLY` to SQL writes, not to what a function
+//! body does with the host: `COPY ... TO PROGRAM`, an untrusted-language
+//! function writing a file, an `dblink` call to a second server. Those run
+//! unimpeded and outlive the rollback. They need privileges the deploying role
+//! should not hold, which is where the boundary actually is — Zapadka does not
+//! try to detect them in SQL, because a blocklist any function call can step
+//! around is advice wearing the costume of a guarantee.
 //!
 //! # Why a failed verification does not revert
 //!
@@ -314,15 +323,14 @@ impl Runner {
             .await
             .map_err(|error| registry_failed(error, "begin the verification transaction"))?;
 
-        // Read-only, not merely rolled back. Rollback undoes table changes, but
-        // it does not undo everything PostgreSQL can do: a `nextval()` is not
-        // rolled back, and neither is anything a function writes outside the
-        // database. A read-only transaction refuses those at the point they are
-        // attempted, which turns "verification leaves nothing behind" from a
-        // claim about rollback into something the server enforces.
+        // Read-only, not merely rolled back. Rollback undoes table changes but
+        // not a `nextval()`, so read-only is what turns "verification cannot
+        // change committed state" from a claim about rollback into something
+        // the server enforces.
         //
-        // Temporary tables remain writable, so a verification script can still
-        // build scratch data to check against.
+        // It enforces that and no more: effects a function has outside the
+        // database are beyond what `READ ONLY` governs. See this module's
+        // documentation for where that boundary really sits.
         transaction
             .batch_execute("SET TRANSACTION READ ONLY")
             .await

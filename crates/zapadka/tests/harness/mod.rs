@@ -115,6 +115,18 @@ impl Database {
         )
     }
 
+    /// The connection URI for this database as some other role.
+    ///
+    /// The default superuser makes a poor subject for tests about privilege,
+    /// since it has every privilege there is.
+    pub fn uri_as(&self, role: &str, password: &str) -> String {
+        let postgres = postgres();
+        format!(
+            "postgresql://{role}:{password}@{}:{}/{}",
+            postgres.host, postgres.port, self.name
+        )
+    }
+
     /// The database's name, useful in a failure message.
     pub fn name(&self) -> &str {
         &self.name

@@ -64,6 +64,27 @@ pub async fn open(
         });
     }
 
+    if facts.reaches_outside_database {
+        session.diagnose(Diagnostic {
+            severity: Severity::Note,
+            code: "target.privileged_role".to_owned(),
+            message: format!(
+                "{} connects as {}, which can act outside the database",
+                name, facts.current_user
+            ),
+            migration_id: None,
+            location: None,
+            hint: Some(
+                "the role is a superuser or a member of pg_execute_server_program or \
+                 pg_write_server_files. Zapadka runs verification read-only so it cannot change \
+                 committed state, but nothing rolls back a COPY ... TO PROGRAM or a file an \
+                 untrusted-language function writes. Deploying as a role that owns the schema and \
+                 no more keeps that guarantee whole."
+                    .to_owned(),
+            ),
+        });
+    }
+
     let timeouts = Timeouts {
         lock_timeout: target.and_then(|target| target.lock_timeout),
         statement_timeout: target.and_then(|target| target.statement_timeout),

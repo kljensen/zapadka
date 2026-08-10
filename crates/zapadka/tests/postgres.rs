@@ -551,6 +551,52 @@ fn an_unencrypted_connection_is_reported() {
     );
 }
 
+/// Zapadka runs verification read-only so it cannot change committed state.
+/// That guarantee is about the database, and a role that can reach past the
+/// database is outside it — no transaction rolls back a `COPY ... TO PROGRAM`.
+/// Only Zapadka is positioned to notice, so it says so rather than letting the
+/// promise read as broader than it is.
+#[test]
+fn a_role_that_can_act_outside_the_database_is_reported() {
+    let db = database();
+    let project = project();
+
+    // The harness connects as the superuser, which is exactly such a role.
+    let report = project.report(&["status", "--uri", &db.uri()]);
+    report.assert_success();
+    assert!(
+        report
+            .diagnostic_codes()
+            .contains(&"target.privileged_role"),
+        "connecting as a superuser should say so: {:?}",
+        report.diagnostic_codes()
+    );
+}
+
+#[test]
+fn an_ordinary_role_draws_no_privilege_note() {
+    let db = database();
+    let project = project();
+    // Roles are cluster-wide while the database is disposable, so the role is
+    // named after the database to keep concurrent tests from colliding.
+    let role = format!("{}_deployer", db.name());
+    db.query(&format!(
+        "CREATE ROLE {role} LOGIN PASSWORD 'deployer'; \
+         GRANT CONNECT ON DATABASE {} TO {role}",
+        db.name()
+    ));
+
+    let report = project.report(&["status", "--uri", &db.uri_as(&role, "deployer")]);
+    report.assert_success();
+    assert!(
+        !report
+            .diagnostic_codes()
+            .contains(&"target.privileged_role"),
+        "a role with no privileges beyond the database should draw no note: {:?}",
+        report.diagnostic_codes()
+    );
+}
+
 #[test]
 fn reverts_a_leaf_and_removes_it_from_applied_state() {
     let db = database();

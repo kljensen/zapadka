@@ -181,6 +181,15 @@ pub struct ServerFacts {
     pub session_user: String,
     /// The role privileges are currently evaluated against.
     pub current_user: String,
+    /// Whether this role can act outside the database.
+    ///
+    /// True for a superuser, or a member of `pg_execute_server_program` or
+    /// `pg_write_server_files`. Such a role can run `COPY ... TO PROGRAM` or
+    /// write to the server's filesystem, and no transaction undoes either.
+    /// Zapadka's promise that verification changes nothing is a promise about
+    /// the database's committed state, so a role that can step outside it is
+    /// worth naming rather than assuming away.
+    pub reaches_outside_database: bool,
 }
 
 /// The oldest PostgreSQL Zapadka supports.
@@ -195,10 +204,20 @@ pub const MINIMUM_SERVER_VERSION_NUM: i32 = 180_000;
 pub async fn server_facts(client: &Client) -> Result<ServerFacts> {
     let row = client
         .query_one(
+            // `is_superuser` reflects the effective state, including a
+            // `SET ROLE`. The two predefined roles are checked by OID lookup
+            // rather than by name so a database without them -- they are
+            // built in, but a catalog can be surprising -- reads as false
+            // instead of erroring.
             "SELECT current_setting('server_version'), \
                     current_setting('server_version_num')::int, \
                     session_user::text, \
-                    current_user::text",
+                    current_user::text, \
+                    current_setting('is_superuser') = 'on' \
+                      OR EXISTS (SELECT 1 FROM pg_roles \
+                                  WHERE rolname IN ('pg_execute_server_program', \
+                                                    'pg_write_server_files') \
+                                    AND pg_has_role(current_user, oid, 'USAGE'))",
             &[],
         )
         .await
@@ -209,6 +228,7 @@ pub async fn server_facts(client: &Client) -> Result<ServerFacts> {
         server_version_num: row.get(1),
         session_user: row.get(2),
         current_user: row.get(3),
+        reaches_outside_database: row.get(4),
     };
 
     if facts.server_version_num < MINIMUM_SERVER_VERSION_NUM {
