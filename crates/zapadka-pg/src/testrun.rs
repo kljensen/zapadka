@@ -10,16 +10,23 @@
 //! mean sharing a schema between tests that each assume they own it, which
 //! trades a real guarantee for a small amount of wall-clock time.
 //!
-//! # Sequences
+//! # Sequences, and what isolation does not cover
 //!
 //! Rollback is not quite enough on its own. PostgreSQL deliberately does not
 //! roll back `nextval()`, so a test that inserts one row into a table with a
 //! generated key advances that sequence permanently — and a later file
-//! asserting on a generated id would then depend on which files ran before it.
+//! asserting on a generated id depends on which files ran before it.
 //!
-//! So each file's sequence values are captured before it runs and restored
-//! after it rolls back. Only sequences the file actually moved are written
-//! back, so the common case costs one query.
+//! Zapadka **reports** this rather than undoing it. Restoring a sequence means
+//! calling `setval` backwards, and Zapadka's advisory lock serializes other
+//! Zapadka runs but not application connections. If anything else drew from
+//! that sequence between the snapshot and the restore, rewinding it would hand
+//! out a key that has already been issued. Trading a test-ordering problem for
+//! a duplicate-key problem in a live database is not a trade worth making.
+//!
+//! So a run that advances a sequence says so, naming it, and the fix belongs
+//! in the test: assert on what a row contains rather than on the id it was
+//! given.
 
 use std::time::Instant;
 
@@ -39,6 +46,8 @@ pub struct TestOutcome {
     pub document: Option<TapDocument>,
     /// Why the file failed, when it did.
     pub error: Option<Error>,
+    /// Sequences the file advanced, which rollback does not undo.
+    pub advanced_sequences: Vec<AdvancedSequence>,
     /// How long the file took, in milliseconds.
     pub duration_ms: u64,
 }
@@ -60,18 +69,21 @@ pub async fn run_file(
     application_schemas: &[String],
 ) -> TestOutcome {
     let started = Instant::now();
-    let result = run_inner(client, file, application_schemas).await;
+    let mut advanced = Vec::new();
+    let result = run_inner(client, file, application_schemas, &mut advanced).await;
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
     match result {
         Ok(document) => TestOutcome {
             document: Some(document),
             error: None,
+            advanced_sequences: advanced,
             duration_ms,
         },
         Err(error) => TestOutcome {
             document: None,
             error: Some(error),
+            advanced_sequences: advanced,
             duration_ms,
         },
     }
@@ -82,6 +94,7 @@ async fn run_inner(
     client: &mut Client,
     file: &TestFile,
     application_schemas: &[String],
+    advanced: &mut Vec<AdvancedSequence>,
 ) -> Result<TapDocument> {
     // A test file that commits would escape the rollback: the whole file is
     // sent as one simple query, so statements after a `COMMIT` run outside the
@@ -118,9 +131,7 @@ async fn run_inner(
         .await
         .map_err(|error| registry_failed(error, "roll back the test transaction"))?;
 
-    // Restored after the rollback, so the next file starts from the same state
-    // this one did.
-    restore_sequences(client, &sequences).await?;
+    advanced.extend(sequences_advanced(client, &sequences).await?);
 
     let messages = outcome.map_err(|error| sql_error(&error, file))?;
     let tap = collect_tap(&messages, file)?;
@@ -141,16 +152,27 @@ async fn run_inner(
 /// One sequence's position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SequenceState {
-    /// Fully qualified and quoted, ready to pass to `setval`.
+    /// Fully qualified and quoted, ready to interpolate.
     name: String,
     last_value: i64,
     is_called: bool,
 }
 
+/// A sequence a test file advanced.
+#[derive(Debug, Clone)]
+pub struct AdvancedSequence {
+    /// The sequence's qualified name.
+    pub name: String,
+    /// Where it was before the file ran.
+    pub was: i64,
+    /// Where it is now.
+    pub now: i64,
+}
+
 /// Reads the position of every sequence a test could move.
 ///
 /// System catalogs and Zapadka's own schemas are excluded: nothing in a test
-/// file should be touching those, and restoring them would be overreach.
+/// file should be touching those.
 async fn snapshot_sequences(client: &Client) -> Result<Vec<SequenceState>> {
     let rows = client
         .query(
@@ -166,19 +188,16 @@ async fn snapshot_sequences(client: &Client) -> Result<Vec<SequenceState>> {
     let mut states = Vec::with_capacity(rows.len());
     for row in rows {
         let name: String = row.get(0);
-        // `last_value` and `is_called` are not exposed by pg_sequences, so the
-        // sequence itself has to be read.
         // A role can hold USAGE on a sequence -- enough to call `nextval()` --
         // without SELECT, which is what reading its position needs. Skipping it
-        // would leave a sequence a test can advance and Zapadka cannot restore,
-        // quietly withdrawing the isolation guarantee for that one sequence.
+        // would leave a sequence a test can advance and Zapadka cannot report.
         let state = client
             .query_one(&format!("SELECT last_value, is_called FROM {name}"), &[])
             .await
             .map_err(|error| {
                 registry_failed(error, &format!("read sequence {name}")).with_hint(
-                    "the test role needs SELECT on every sequence it can advance, so that \
-                         Zapadka can put it back after each file",
+                    "the test role needs SELECT on every sequence it can advance, so that Zapadka \
+                     can tell you when a test file moved one",
                 )
             })?;
         states.push(SequenceState {
@@ -190,8 +209,14 @@ async fn snapshot_sequences(client: &Client) -> Result<Vec<SequenceState>> {
     Ok(states)
 }
 
-/// Puts back any sequence the test file moved.
-async fn restore_sequences(client: &Client, before: &[SequenceState]) -> Result<()> {
+/// Reports which sequences moved while the file ran.
+///
+/// Deliberately does not put them back. See the module documentation.
+async fn sequences_advanced(
+    client: &Client,
+    before: &[SequenceState],
+) -> Result<Vec<AdvancedSequence>> {
+    let mut advanced = Vec::new();
     for state in before {
         let row = client
             .query_one(
@@ -200,31 +225,24 @@ async fn restore_sequences(client: &Client, before: &[SequenceState]) -> Result<
             )
             .await
             .map_err(|error| registry_failed(error, &format!("read sequence {}", state.name)))?;
+
         let now = SequenceState {
             name: state.name.clone(),
             last_value: row.get(0),
             is_called: row.get(1),
         };
-        if &now == state {
-            continue;
+        if &now != state {
+            advanced.push(AdvancedSequence {
+                name: state.name.clone(),
+                was: state.last_value,
+                now: now.last_value,
+            });
         }
-        // Only the ones that actually moved, so an ordinary test file costs one
-        // query rather than one write per sequence in the database.
-        client
-            .execute(
-                &format!(
-                    "SELECT setval('{}', $1, $2)",
-                    state.name.replace('\'', "''")
-                ),
-                &[&state.last_value, &state.is_called],
-            )
-            .await
-            .map_err(|error| registry_failed(error, &format!("restore sequence {}", state.name)))?;
     }
-    Ok(())
+    Ok(advanced)
 }
 
-/// Turns a server error during a test file into a Zapadka error.
+/// Turns a server error during a test file into a Zapadka error./// Turns a server error during a test file into a Zapadka error.
 fn sql_error(error: &tokio_postgres::Error, file: &TestFile) -> Error {
     let database = error.as_db_error();
     let message = database.map_or_else(|| error.to_string(), |db| db.message().to_owned());
@@ -329,6 +347,7 @@ mod tests {
         let outcome = TestOutcome {
             document: Some(document),
             error: None,
+            advanced_sequences: Vec::new(),
             duration_ms: 1,
         };
         assert!(!outcome.passed());
@@ -340,6 +359,7 @@ mod tests {
         let outcome = TestOutcome {
             document: Some(document),
             error: None,
+            advanced_sequences: Vec::new(),
             duration_ms: 1,
         };
         assert!(outcome.passed());
@@ -354,6 +374,7 @@ mod tests {
         let outcome = TestOutcome {
             document: None,
             error: Some(Error::new(ErrorCode::VerifyFailed, "boom")),
+            advanced_sequences: Vec::new(),
             duration_ms: 1,
         };
         assert!(!outcome.passed());

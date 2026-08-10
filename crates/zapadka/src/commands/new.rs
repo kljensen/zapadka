@@ -42,7 +42,20 @@ pub fn run(root: &Utf8Path, graph: &Graph, args: &NewArgs, session: &mut Session
         resolve_explicit_dependencies(graph, &args.depends, session)?
     };
 
-    let reversibility = match args.irreversible {
+    let reversibility = match &args.irreversible {
+        Some(reason) if reason.trim().is_empty() => {
+            // Checked before the directory is created. Writing the package and
+            // then having the next command reject it leaves a project to be
+            // repaired by hand.
+            return Err(Error::new(
+                ErrorCode::MigrationReversibilityInvalid,
+                "--irreversible needs a reason",
+            )
+            .with_hint(
+                "explain what makes this migration impossible to undo, such as dropping a column \
+                 whose data is not recoverable",
+            ));
+        }
         Some(_) => Reversibility::Irreversible,
         None => Reversibility::Reversible,
     };

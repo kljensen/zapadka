@@ -24,8 +24,23 @@ pub fn lookup(name: &str) -> Result<ServiceSettings> {
     let mut searched = Vec::new();
     for path in candidate_paths() {
         searched.push(path.clone());
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            // A file that is not there is the normal case: try the next one.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            // A file that exists but cannot be read is not. Falling through
+            // could find the same service name in the system-wide file and
+            // connect somewhere the operator did not configure.
+            Err(error) => {
+                return Err(Error::new(
+                    ErrorCode::TargetInvalid,
+                    format!("cannot read the service file {path}: {error}"),
+                )
+                .with_hint(
+                    "a service file that exists but cannot be read is not skipped, because the \
+                     next candidate could define the same service differently",
+                ));
+            }
         };
         if let Some(settings) = parse(&text, name)
             .map_err(|message| Error::new(ErrorCode::TargetInvalid, format!("{path}: {message}")))?

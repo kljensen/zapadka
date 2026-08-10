@@ -159,6 +159,28 @@ async fn run_suite(
         if !outcome.passed() {
             failures += 1;
         }
+        // Rollback does not undo `nextval()`, and Zapadka deliberately does not
+        // rewind it -- see the runner's module documentation. Reporting it is
+        // what keeps the isolation guarantee honest about its own edge.
+        for sequence in &outcome.advanced_sequences {
+            session.diagnose(zapadka_core::report::Diagnostic {
+                severity: zapadka_core::report::Severity::Warning,
+                code: "test.sequence_advanced".to_owned(),
+                message: format!(
+                    "{} advanced sequence {} from {} to {}",
+                    file.relative_path, sequence.name, sequence.was, sequence.now
+                ),
+                migration_id: None,
+                location: Some(zapadka_core::report::Location::file(&file.relative_path)),
+                hint: Some(
+                    "PostgreSQL does not roll back nextval(), and Zapadka will not rewind a \
+                     sequence in case another session has already been issued a value from it. \
+                     A later file that asserts on a generated id will depend on run order; \
+                     assert on what the row contains instead."
+                        .to_owned(),
+                ),
+            });
+        }
         session.tests.push(to_report(file, &outcome));
     }
 
@@ -275,6 +297,7 @@ mod tests {
         testrun::TestOutcome {
             document: Some(tap::parse(text).unwrap()),
             error: None,
+            advanced_sequences: Vec::new(),
             duration_ms: 7,
         }
     }
@@ -318,6 +341,7 @@ mod tests {
                     Error::new(ErrorCode::VerifyFailed, "relation does not exist")
                         .with_sqlstate("42P01"),
                 ),
+                advanced_sequences: Vec::new(),
                 duration_ms: 3,
             },
         );

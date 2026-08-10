@@ -62,6 +62,14 @@ SELECT 1 / (CASE WHEN (SELECT count(*) FROM app.orders)
                  = (SELECT count(*) FROM expected) THEN 1 ELSE 0 END);
 ```
 
+**Database tests are isolated, with one documented exception.** Each test file
+runs on a fresh connection in a transaction Zapadka always rolls back, so no
+file can see another's data. PostgreSQL does not roll back `nextval()`, and
+Zapadka will not rewind a sequence — its lock serializes Zapadka runs but not
+application connections, so rewinding could hand out a key already issued.
+A run that advances a sequence says so; assert on what a row contains rather
+than on the id it was given.
+
 **Nothing is reverted automatically.** If verification fails after a migration
 committed, Zapadka records that and stops. It does not run unproven revert SQL
 against an unexpected schema while nobody is watching.

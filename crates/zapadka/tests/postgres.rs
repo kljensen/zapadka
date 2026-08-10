@@ -1183,10 +1183,15 @@ fn a_successful_deploy_records_its_event_atomically() {
 }
 
 #[test]
-fn a_test_file_cannot_leak_sequence_state_to_the_next_one() {
-    // PostgreSQL does not roll back `nextval()`, so rollback alone would let a
-    // file that inserts one row permanently advance a generated key -- and a
-    // later file asserting on an id would then depend on run order.
+fn a_test_file_that_advances_a_sequence_is_reported() {
+    // PostgreSQL does not roll back `nextval()`. Zapadka deliberately does not
+    // rewind it either: its lock serializes other Zapadka runs but not
+    // application connections, so rewinding could hand out a key already
+    // issued to someone else. Trading a test-ordering problem for a
+    // duplicate-key problem in a live database is not a trade worth making.
+    //
+    // So the property is reported rather than silently broken or unsafely
+    // repaired.
     let db = database();
     let project = project();
     project.migration(
@@ -1199,36 +1204,25 @@ fn a_test_file_cannot_leak_sequence_state_to_the_next_one() {
         .assert_success();
 
     project.test_file(
-        "a-inserts.sql",
+        "inserts.sql",
         "SELECT plan(1);
          INSERT INTO public.orders (note) VALUES ('first');
          SELECT ok(true, 'inserted a row');
          SELECT finish();",
     );
-    // Runs second, and asserts it gets the same generated id the first file did.
-    project.test_file(
-        "b-expects-the-same-id.sql",
-        "SELECT plan(1);
-         WITH inserted AS (
-             INSERT INTO public.orders (note) VALUES ('second') RETURNING id
-         )
-         SELECT is(
-             (SELECT id FROM inserted),
-             1::bigint,
-             'the sequence was not advanced by the previous file');
-         SELECT finish();",
-    );
 
-    project
-        .report(&["test", "--uri", &db.uri()])
-        .assert_success();
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_success();
 
-    // And the target itself is left where it started.
-    assert_eq!(
-        db.scalar("SELECT is_called FROM public.orders_id_seq"),
-        "f",
-        "the suite advanced a sequence on the target"
+    assert!(
+        report
+            .diagnostic_codes()
+            .contains(&"test.sequence_advanced"),
+        "advancing a sequence should be reported: {:?}",
+        report.diagnostic_codes()
     );
+    // The row itself is gone, which is what rollback does cover.
+    assert_eq!(db.scalar("SELECT count(*) FROM public.orders"), "0");
 }
 
 #[test]

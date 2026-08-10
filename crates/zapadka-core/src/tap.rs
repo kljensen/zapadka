@@ -529,18 +529,26 @@ fn split_directive(rest: &str) -> (&str, Option<Directive>) {
     let directive = directive[1..].trim();
     let upper = directive.to_uppercase();
 
-    let parsed = if let Some(reason) = upper.strip_prefix("TODO") {
-        Some(Directive::Todo(
-            directive[directive.len() - reason.len()..]
-                .trim()
-                .to_owned(),
-        ))
-    } else if let Some(reason) = upper.strip_prefix("SKIP") {
-        Some(Directive::Skip(
-            directive[directive.len() - reason.len()..]
-                .trim()
-                .to_owned(),
-        ))
+    // The keyword has to end at a token boundary, exactly as `ok` and `not ok`
+    // do. `# TODO-list is incomplete` is a description, and reading it as a
+    // TODO would turn a real failure into a passing file.
+    let ends_token = |reason: &str| {
+        reason
+            .chars()
+            .next()
+            .is_none_or(|c| c.is_whitespace() || c == ':')
+    };
+    let reason_text = |reason: &str| {
+        directive[directive.len() - reason.len()..]
+            .trim_start_matches(':')
+            .trim()
+            .to_owned()
+    };
+
+    let parsed = if let Some(reason) = upper.strip_prefix("TODO").filter(|r| ends_token(r)) {
+        Some(Directive::Todo(reason_text(reason)))
+    } else if let Some(reason) = upper.strip_prefix("SKIP").filter(|r| ends_token(r)) {
+        Some(Directive::Skip(reason_text(reason)))
     } else {
         // A `#` that is not a directive is part of the description, which is
         // how a test describing `# of rows` keeps its description intact.
@@ -746,6 +754,25 @@ mod tests {
         // Flattening would merge a nested file's results into this one's count.
         let kind = err("1..1\n    ok 1 - inner\n    1..1\nok 1 - outer\n");
         assert!(matches!(kind, TapErrorKind::Unsupported(_)), "{kind:?}");
+    }
+
+    #[test]
+    fn a_word_merely_starting_with_a_directive_is_not_a_directive() {
+        // `# TODO-list is incomplete` is a description. Reading it as a TODO
+        // would turn a real failure into a passing file.
+        for description in [
+            "# TODO-list is incomplete",
+            "# SKIPPED unexpectedly",
+            "# TODOS remain",
+        ] {
+            let document = ok(&format!("1..1\nnot ok 1 - x {description}\n"));
+            assert_eq!(
+                document.assertions[0].outcome,
+                Outcome::Failed,
+                "{description}"
+            );
+            assert!(!document.passed(), "{description}");
+        }
     }
 
     #[test]
