@@ -82,10 +82,11 @@ pub fn resolve(
     uri: Option<&str>,
 ) -> Result<Resolved> {
     if let Some(uri) = uri {
+        let (uri, root_certificate) = split_root_certificate(uri);
         return Ok(Resolved {
-            config: parse_uri(uri)?,
+            config: parse_uri(&uri)?,
             source: Source::CommandLine,
-            root_certificate: None,
+            root_certificate,
         });
     }
 
@@ -107,10 +108,11 @@ pub fn resolve(
                 "target {target_name:?} takes its connection URI from {variable}"
             ))
         })?;
+        let (uri, root_certificate) = split_root_certificate(&uri);
         return Ok(Resolved {
             config: parse_uri(&uri)?,
             source: Source::Environment,
-            root_certificate: None,
+            root_certificate,
         });
     }
 
@@ -130,6 +132,57 @@ pub fn resolve(
         format!("target {target_name:?} says nothing about how to connect"),
     )
     .with_hint("set pg_service or uri_env on the target, or pass --uri"))
+}
+
+/// Removes `sslrootcert` from a URI and returns it separately.
+///
+/// tokio-postgres rejects the parameter outright, so a URI carrying it could
+/// not connect at all -- which would mean a private certificate authority was
+/// usable only through a service file, despite `--uri` and `uri_env` being
+/// offered as equals.
+fn split_root_certificate(uri: &str) -> (String, Option<String>) {
+    let Some((base, query)) = uri.split_once('?') else {
+        return (uri.to_owned(), None);
+    };
+
+    let mut certificate = None;
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|parameter| match parameter.split_once('=') {
+            Some(("sslrootcert", value)) => {
+                certificate = Some(percent_decode(value));
+                false
+            }
+            _ => true,
+        })
+        .collect();
+
+    let rebuilt = if kept.is_empty() {
+        base.to_owned()
+    } else {
+        format!("{base}?{}", kept.join("&"))
+    };
+    (rebuilt, certificate)
+}
+
+/// Decodes the percent-escapes a path in a URI query string may carry.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or("");
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Parses a `postgresql://` URI.
@@ -467,6 +520,33 @@ mod tests {
         let error = ssl_mode("verify_full", "s").unwrap_err();
         assert_eq!(error.code, ErrorCode::TargetInvalid);
         assert!(error.hint().unwrap().contains("verify-full"));
+    }
+
+    #[test]
+    fn a_uri_can_carry_a_private_certificate_authority() {
+        // tokio-postgres rejects `sslrootcert` outright, so without lifting it
+        // out a private CA would be usable only through a service file --
+        // despite --uri and uri_env being offered as equals.
+        let (uri, ca) = split_root_certificate(
+            "postgresql://db/app?sslmode=verify-full&sslrootcert=%2Fetc%2Fssl%2Fca.pem",
+        );
+        assert_eq!(uri, "postgresql://db/app?sslmode=verify-full");
+        assert_eq!(ca.as_deref(), Some("/etc/ssl/ca.pem"));
+        // The remaining URI must still parse.
+        parse_uri(&uri).unwrap();
+    }
+
+    #[test]
+    fn a_uri_without_a_certificate_is_left_alone() {
+        for uri in ["postgresql://db/app", "postgresql://db/app?sslmode=require"] {
+            let (rebuilt, ca) = split_root_certificate(uri);
+            assert_eq!(rebuilt, uri);
+            assert_eq!(ca, None);
+        }
+        // The only parameter, so the `?` goes with it.
+        let (rebuilt, ca) = split_root_certificate("postgresql://db/app?sslrootcert=/ca.pem");
+        assert_eq!(rebuilt, "postgresql://db/app");
+        assert_eq!(ca.as_deref(), Some("/ca.pem"));
     }
 
     #[test]

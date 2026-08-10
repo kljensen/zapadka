@@ -1429,3 +1429,68 @@ fn renaming_the_registry_schema_does_not_make_room_for_a_second_project() {
         "the second project must not have created its own registry"
     );
 }
+
+#[test]
+fn the_registry_schema_cannot_be_renamed_out_from_under_a_deployed_project() {
+    // Pointing the same project at a different schema would create a second,
+    // empty registry and re-run every migration against a database that
+    // already has them.
+    let db = database();
+    let project = project();
+    project.migration("first", &[], "CREATE TABLE public.a (i int);");
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    let config = project.root().join("zapadka.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        text.replace(
+            "registry_schema = \"zapadka\"",
+            "registry_schema = \"zapadka_renamed\"",
+        ),
+    )
+    .unwrap();
+
+    let report = project.report(&["deploy", "--uri", &db.uri()]);
+    report.assert_failed("registry.project_mismatch", exit::REGISTRY);
+    assert!(
+        report.json["error"]["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("run them all again"),
+        "the hint should say what would happen"
+    );
+    assert_eq!(
+        db.scalar("SELECT count(*) FROM pg_namespace WHERE nspname = 'zapadka_renamed'"),
+        "0"
+    );
+}
+
+#[test]
+fn the_registry_can_be_created_in_a_schema_that_already_exists() {
+    // `registry_schema` may name a schema that exists for other reasons --
+    // `public` being the obvious case -- and a first deploy into it must work.
+    let db = database();
+    let project = project();
+    let config = project.root().join("zapadka.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        text.replace(
+            "registry_schema = \"zapadka\"",
+            "registry_schema = \"public\"",
+        ),
+    )
+    .unwrap();
+    project.migration("first", &[], "CREATE TABLE public.a (i int);");
+
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+    assert_eq!(
+        db.scalar("SELECT count(*) FROM public.applied_migrations"),
+        "1"
+    );
+}

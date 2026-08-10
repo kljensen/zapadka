@@ -63,6 +63,23 @@ pub fn key_for(project_id: Uuid) -> i64 {
     i64::from_be_bytes(bytes)
 }
 
+/// The advisory lock key that serializes *ownership claims*.
+///
+/// A constant, deliberately: the deployment lock is derived from the project
+/// id, so two projects first deploying to the same empty database would take
+/// different locks, both find no existing registry, and both create one. The
+/// claim has to be serialized on something neither project chooses.
+const OWNERSHIP_KEY: i64 = -0x7a70_6164_6b61_0001;
+
+/// Takes the database-global ownership lock.
+///
+/// Held only across the ownership check and registry creation, which is a
+/// handful of statements. Every Zapadka project on a server contends for this
+/// one lock, so it is deliberately not held for the duration of a deploy.
+pub async fn acquire_ownership(client: &Client, wait: Timeout) -> Result<DeploymentLock> {
+    acquire_key(client, OWNERSHIP_KEY, wait).await
+}
+
 /// Acquires the deployment lock, waiting up to `wait`.
 ///
 /// A zero `wait` waits indefinitely, matching PostgreSQL's convention for
@@ -70,8 +87,11 @@ pub fn key_for(project_id: Uuid) -> i64 {
 /// deploy that cannot get the lock promptly is usually racing another deploy,
 /// and failing fast tells a pipeline something useful.
 pub async fn acquire(client: &Client, project_id: Uuid, wait: Timeout) -> Result<DeploymentLock> {
-    let key = key_for(project_id);
+    acquire_key(client, key_for(project_id), wait).await
+}
 
+/// Acquires a specific advisory lock, waiting up to `wait`.
+async fn acquire_key(client: &Client, key: i64, wait: Timeout) -> Result<DeploymentLock> {
     if try_lock(client, key).await? {
         return Ok(DeploymentLock { key });
     }

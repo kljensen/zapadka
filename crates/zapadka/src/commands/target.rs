@@ -47,8 +47,13 @@ pub async fn open(
     // And again database-wide, because `registry_schema` is configurable: two
     // projects with different schema names would each see only their own
     // registry and both conclude the database was theirs.
-    registry::check_database_ownership(&connection.client, &schema, config.config.project.id)
-        .await?;
+    check_ownership_under_lock(
+        &connection.client,
+        &schema,
+        config.config.project.id,
+        config.config.policy.advisory_lock_timeout,
+    )
+    .await?;
 
     if !connection.encrypted && !connection.encryption_opted_out {
         session.diagnose(Diagnostic {
@@ -149,8 +154,36 @@ pub async fn refresh_state(
 ) -> Result<RegistryState> {
     let state = registry::read(client, schema).await?;
     registry::check_project(&state, config.config.project.id)?;
-    registry::check_database_ownership(client, schema, config.config.project.id).await?;
+    check_ownership_under_lock(
+        client,
+        schema,
+        config.config.project.id,
+        config.config.policy.advisory_lock_timeout,
+    )
+    .await?;
     Ok(state)
+}
+
+/// Checks database-wide ownership while holding the ownership lock.
+///
+/// The lock is database-global rather than project-derived. Two projects first
+/// deploying to the same empty database would otherwise take different
+/// deployment locks, both find no registry, and both create one -- so the claim
+/// has to be serialized on something neither of them chooses.
+///
+/// Held only across the check. Every Zapadka project on a server contends for
+/// this one lock, so holding it for a whole deploy would serialize unrelated
+/// databases.
+async fn check_ownership_under_lock(
+    client: &zapadka_pg::Client,
+    schema: &str,
+    project_id: uuid::Uuid,
+    wait: zapadka_core::duration::Timeout,
+) -> Result<()> {
+    let held = zapadka_pg::lock::acquire_ownership(client, wait).await?;
+    let outcome = registry::check_database_ownership(client, schema, project_id).await;
+    let released = held.release(client).await;
+    outcome.and(released)
 }
 
 /// Requires that the registry exists, for commands that cannot create it.

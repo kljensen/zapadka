@@ -285,6 +285,25 @@ pub async fn check_database_ownership(
         return Ok(());
     };
     if owner == project_id {
+        // Same project, different schema. Proceeding would create a second,
+        // empty registry and re-run every migration against a database that
+        // already has them.
+        if schema != configured_schema {
+            return Err(Error::new(
+                ErrorCode::RegistryProjectMismatch,
+                format!(
+                    "this project's registry is in schema {schema}, but zapadka.toml says \
+                     {configured_schema}"
+                ),
+            )
+            .with_context("registry_schema", &schema)
+            .with_context("configured_registry_schema", configured_schema)
+            .with_hint(
+                "set project.registry_schema back to the schema the registry is actually in. \
+                 Zapadka will not create a second registry: it would treat every applied \
+                 migration as pending and run them all again.",
+            ));
+        }
         return Ok(());
     }
 
@@ -327,13 +346,27 @@ pub async fn read(client: &Client, schema: &str) -> Result<RegistryState> {
         });
     }
 
-    let meta = client
+    // The schema existing does not mean the registry does. `registry_schema`
+    // may name a schema that already exists for other reasons -- `public` being
+    // the obvious case -- and a first deploy into it must work.
+    let meta = match client
         .query_opt(
             &format!("SELECT project_id, registry_format_version FROM {quoted}.meta"),
             &[],
         )
         .await
-        .map_err(|error| registry_failed(error, "read the registry metadata"))?;
+    {
+        Ok(meta) => meta,
+        Err(error)
+            if error
+                .as_db_error()
+                .map(tokio_postgres::error::DbError::code)
+                == Some(&tokio_postgres::error::SqlState::UNDEFINED_TABLE) =>
+        {
+            None
+        }
+        Err(error) => return Err(registry_failed(error, "read the registry metadata")),
+    };
 
     let (project_id, format_version) = match meta {
         Some(row) => (Some(row.get::<_, Uuid>(0)), Some(row.get::<_, i32>(1))),
@@ -354,6 +387,18 @@ pub async fn read(client: &Client, schema: &str) -> Result<RegistryState> {
         .with_hint("a newer Zapadka has deployed to this database; upgrade this binary")
         .with_context("registry_format_version", version)
         .with_context("supported_format_version", REGISTRY_FORMAT_VERSION));
+    }
+
+    // No metadata means no registry, whatever else the schema contains. Reading
+    // the other tables would fail on a schema that exists for unrelated reasons
+    // -- `public` being the obvious case -- and a first deploy into one of
+    // those has to work.
+    if format_version.is_none() {
+        return Ok(RegistryState {
+            format_version: None,
+            project_id: None,
+            applied: BTreeMap::new(),
+        });
     }
 
     let rows = client
