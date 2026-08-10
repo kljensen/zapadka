@@ -67,6 +67,35 @@ jobs:
       - name: Smoke test against PostgreSQL 18
         run: .github/scripts/smoke-test.sh target/${{ matrix.target }}/release/zapadka
 
+      # An SBOM is how a downstream user answers "does this binary contain the
+      # thing that was just disclosed" without rebuilding it. Generated from the
+      # locked dependency graph, so it describes what was actually compiled.
+      # An SBOM is how a downstream user answers "does this binary contain the
+      # thing that was just disclosed" without rebuilding it. Generated from the
+      # locked dependency graph, so it describes what was actually compiled.
+      - name: Generate an SBOM
+        run: |
+          cargo install cargo-cyclonedx --locked
+          cargo cyclonedx --format json --spec-version 1.5 --target ${{ matrix.target }}
+          sbom="$(find . -name 'zapadka*.cdx.json' -not -path './target/*' | head -1)"
+          test -n "$sbom" || { echo "::error::no SBOM was produced"; exit 1; }
+          mv "$sbom" "target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}.cdx.json"
+
+      # The vendored parser and pgTAP are compiled in rather than resolved as
+      # crates, so they do not appear in the dependency graph. Recording them
+      # alongside the SBOM keeps the artifact list honest.
+      - name: Record vendored components
+        run: |
+          {
+            echo "# Components vendored into this binary, not resolved as crates."
+            echo
+            for tree in third_party/*/; do
+              echo "## $(basename "$tree")"
+              grep -E '^(upstream|release|revision|license|archive_sha256) ' "$tree/PROVENANCE.toml" || true
+              echo
+            done
+          } > target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}.vendored.md
+
       - name: Checksum
         run: |
           cd target/${{ matrix.target }}/release
@@ -79,6 +108,8 @@ jobs:
           path: |
             target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}
             target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}.sha256
+            target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}.cdx.json
+            target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}.vendored.md
           if-no-files-found: error
 
   publish:

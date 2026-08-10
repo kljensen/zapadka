@@ -6,3 +6,7 @@ tmp
 .pi
 
 /target
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/.docker-cargo-registry

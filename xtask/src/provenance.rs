@@ -68,6 +68,90 @@ pub fn verify() -> Result<()> {
     if checked == 0 {
         bail!("third_party/ exists but contains no vendored trees");
     }
+
+    verify_scenarios(&root)?;
+    Ok(())
+}
+
+/// The scenarios file: Zapadka-owned tests adapted from other tools.
+#[derive(Debug, Deserialize)]
+struct Scenarios {
+    format_version: u32,
+    #[serde(default)]
+    scenario: Vec<Scenario>,
+}
+
+/// One adapted scenario and where its idea came from.
+#[derive(Debug, Deserialize)]
+struct Scenario {
+    name: String,
+    /// `path/to/file.rs::test_name`.
+    test: String,
+    inspired_by: String,
+    source: String,
+    classification: String,
+}
+
+/// Checks that every adapted scenario names a test that actually exists.
+///
+/// The scenarios file records where an idea came from. Its value depends
+/// entirely on the reference still pointing at something, and a renamed test
+/// would otherwise turn it into folklore.
+fn verify_scenarios(root: &Utf8Path) -> Result<()> {
+    let path = root.join("tests/fixtures/provenance.toml");
+    if !path.is_file() {
+        return Ok(());
+    }
+
+    let text = std::fs::read_to_string(&path)?;
+    let scenarios: Scenarios = toml::from_str(&text)
+        .with_context(|| format!("{path} is not a valid scenario manifest"))?;
+    if scenarios.format_version != 1 {
+        bail!("{path} declares an unsupported format_version");
+    }
+
+    let mut missing = Vec::new();
+    for scenario in &scenarios.scenario {
+        for (field, value) in [
+            ("name", &scenario.name),
+            ("inspired_by", &scenario.inspired_by),
+            ("source", &scenario.source),
+        ] {
+            if value.trim().is_empty() {
+                bail!("{path}: scenario {:?} leaves {field} empty", scenario.name);
+            }
+        }
+        if scenario.classification != "adapted" {
+            bail!(
+                "{path}: scenario {:?} is classified {:?}; scenarios are always \"adapted\", \
+                 because a literal copy belongs in third_party/ instead",
+                scenario.name,
+                scenario.classification
+            );
+        }
+
+        let Some((source_path, test_name)) = scenario.test.split_once("::") else {
+            bail!(
+                "{path}: scenario {:?} has test {:?}, expected '<file>::<test name>'",
+                scenario.name,
+                scenario.test
+            );
+        };
+        let found = std::fs::read_to_string(root.join(source_path))
+            .is_ok_and(|contents| contents.contains(&format!("fn {test_name}(")));
+        if !found {
+            missing.push(format!("  {} -> {}", scenario.name, scenario.test));
+        }
+    }
+
+    if !missing.is_empty() {
+        bail!(
+            "{path} references tests that no longer exist:\n{}\n\n\
+             Rename the reference or remove the scenario; a provenance record that points at \
+             nothing is worse than none.",
+            missing.join("\n")
+        );
+    }
     Ok(())
 }
 
