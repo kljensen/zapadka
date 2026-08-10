@@ -38,7 +38,7 @@ fn deploys_an_empty_project_without_creating_anything_unexpected() {
     );
     assert_eq!(
         db.scalar("SELECT registry_format_version FROM zapadka.meta"),
-        "1"
+        "2"
     );
 }
 
@@ -1594,4 +1594,227 @@ fn standalone_verify_refuses_a_script_that_became_empty() {
         "1",
         "only the original deploy-time verification should be recorded"
     );
+}
+
+// -- Nontransactional migrations ------------------------------------------
+//
+// The mode exists for statements PostgreSQL refuses to run in a transaction.
+// Everything below is about the consequence: without a transaction, the SQL and
+// the record that it ran cannot commit together, so the recovery path is the
+// feature rather than an afterthought.
+
+/// Stages exactly what a run killed mid-statement leaves behind.
+///
+/// The attempt row is committed before the statement runs, so a process that
+/// dies during the statement leaves this and nothing else.
+fn insert_attempt(db: &harness::Database, id: uuid::Uuid, slug: &str) {
+    db.query(&format!(
+        "INSERT INTO zapadka.nontransactional_attempts \
+           (migration_id, slug, definition_sha256, deploy_sha256, depends, run_id, \
+            session_user_name, server_version, zapadka_version) \
+         VALUES ('{id}', '{slug}', repeat('a', 64), repeat('b', 64), '{{}}'::uuid[], \
+                 gen_random_uuid(), 'postgres', '18', '0.0.0')"
+    ));
+}
+
+#[test]
+fn a_nontransactional_migration_deploys_and_records_its_attempt_first() {
+    let db = database();
+    let project = project();
+    // The index needs a table, and the migration must be a single statement, so
+    // the table is created outside Zapadka.
+    db.query("CREATE TABLE public.orders (id bigint, total numeric)");
+    project.nontransactional_migration(
+        "add-orders-index",
+        &[],
+        "CREATE INDEX CONCURRENTLY orders_total_idx ON public.orders (total);",
+    );
+
+    let report = project.report(&["deploy", "--uri", &db.uri()]);
+    report.assert_success();
+    assert_eq!(report.slugs_with_status("succeeded"), ["add-orders-index"]);
+    assert!(
+        db.has_relation("public.orders_total_idx"),
+        "the index should exist"
+    );
+
+    // The attempt is recorded before the statement runs and cleared after, so
+    // the history shows both and the table is empty.
+    let actions = db.query(
+        "SELECT action, outcome FROM zapadka.events WHERE migration_id IS NOT NULL ORDER BY sequence",
+    );
+    assert_eq!(
+        actions,
+        vec![
+            vec!["deploy".to_owned(), "attempted".to_owned()],
+            vec!["deploy".to_owned(), "succeeded".to_owned()],
+        ],
+        "the attempt must be recorded before the outcome"
+    );
+    assert_eq!(
+        db.scalar("SELECT count(*) FROM zapadka.nontransactional_attempts"),
+        "0",
+        "a resolved attempt leaves no row behind"
+    );
+}
+
+#[test]
+fn a_nontransactional_statement_the_server_refuses_is_not_left_blocking() {
+    let db = database();
+    let project = project();
+    project.nontransactional_migration(
+        "bad-index",
+        &[],
+        "CREATE INDEX CONCURRENTLY bad_idx ON public.does_not_exist (id);",
+    );
+
+    let report = project.report(&["deploy", "--uri", &db.uri()]);
+    report.assert_failed("deploy.failed", 9);
+
+    // The server answered, so the outcome is known: nothing ran. Leaving the
+    // target blocked would demand a resolution for a question with one answer.
+    assert_eq!(
+        db.scalar("SELECT count(*) FROM zapadka.nontransactional_attempts"),
+        "0"
+    );
+    let report = project.report(&["status", "--uri", &db.uri()]);
+    report.assert_success();
+    assert!(!report.diagnostic_codes().contains(&"target.blocked"));
+}
+
+#[test]
+fn an_unresolved_attempt_blocks_deploys_until_it_is_resolved() {
+    let db = database();
+    let project = project();
+    // A first deploy creates the registry, which the simulated crash needs.
+    project.migration(
+        "orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint, total numeric);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    let blocked = project.nontransactional_migration(
+        "add-index",
+        &[],
+        "CREATE INDEX CONCURRENTLY idx ON public.orders (total);",
+    );
+    let later = project.migration("later", &[], "CREATE TABLE public.later (id bigint);");
+
+    // Simulate a run that died mid-statement: the attempt row is exactly what
+    // such a run leaves behind, because it is committed before the statement.
+    insert_attempt(&db, blocked, "add-index");
+
+    let report = project.report(&["deploy", "--uri", &db.uri()]);
+    report.assert_failed("registry.blocked", 8);
+    assert!(
+        !db.has_relation("public.later"),
+        "nothing after the block may be deployed"
+    );
+    assert_eq!(report.error_context("migration_id"), blocked.to_string());
+
+    // status reports the block rather than refusing: it is how someone finds out.
+    let status = project.report(&["status", "--uri", &db.uri()]);
+    status.assert_success();
+    assert!(status.diagnostic_codes().contains(&"target.blocked"));
+
+    // The operator looks, decides the index is not there, and says so.
+    let resolved = project.report(&[
+        "resolve",
+        &blocked.to_string(),
+        "--not-applied",
+        "--uri",
+        &db.uri(),
+    ]);
+    resolved.assert_success();
+    assert!(
+        resolved
+            .diagnostic_codes()
+            .contains(&"resolve.asserted_by_operator"),
+        "an asserted outcome must be marked as asserted: {:?}",
+        resolved.diagnostic_codes()
+    );
+
+    // Unblocked, and the migration is pending again rather than applied.
+    let after = project.report(&["deploy", "--uri", &db.uri()]);
+    after.assert_success();
+    assert!(db.has_relation("public.later"));
+    assert!(db.has_relation("public.idx"));
+    let _ = later;
+}
+
+#[test]
+fn resolving_as_applied_records_it_without_running_any_sql() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint, total numeric);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    let blocked = project.nontransactional_migration(
+        "add-index",
+        &[],
+        "CREATE INDEX CONCURRENTLY idx ON public.orders (total);",
+    );
+    insert_attempt(&db, blocked, "add-index");
+
+    let report = project.report(&[
+        "resolve",
+        &blocked.to_string(),
+        "--applied",
+        "--uri",
+        &db.uri(),
+    ]);
+    report.assert_success();
+
+    // Recorded as applied, and no index was created: resolve runs no user SQL.
+    assert_eq!(
+        db.scalar(&format!(
+            "SELECT count(*) FROM zapadka.applied_migrations WHERE migration_id = '{blocked}'"
+        )),
+        "1"
+    );
+    assert!(
+        !db.has_relation("public.idx"),
+        "resolve records a claim; it does not run the migration"
+    );
+    // The history says a person asserted this, not that Zapadka watched it.
+    assert_eq!(
+        db.scalar("SELECT outcome FROM zapadka.events WHERE action = 'resolve'"),
+        "asserted_applied"
+    );
+}
+
+#[test]
+fn resolve_refuses_without_being_told_what_happened() {
+    let db = database();
+    let project = project();
+    let id = project.nontransactional_migration(
+        "add-index",
+        &[],
+        "CREATE INDEX CONCURRENTLY idx ON public.orders (total);",
+    );
+
+    let report = project.report(&["resolve", &id.to_string(), "--uri", &db.uri()]);
+    report.assert_failed("resolve.nothing_to_resolve", 8);
+}
+
+#[test]
+fn a_nontransactional_migration_with_two_statements_is_rejected_before_connecting() {
+    let project = project();
+    project.nontransactional_migration(
+        "two-statements",
+        &[],
+        "CREATE INDEX CONCURRENTLY a_idx ON public.t (x); CREATE INDEX CONCURRENTLY b_idx ON public.t (y);",
+    );
+
+    let report = project.report(&["lint"]);
+    report.assert_failed("script.statement_count", 4);
 }

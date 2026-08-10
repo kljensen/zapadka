@@ -188,14 +188,46 @@ Zapadka does not deploy as a superuser, and neither should you.
 - Linux x86_64 or aarch64 for released binaries. Building from source works
   anywhere Rust and a C compiler do.
 
-## Limitations
+## Nontransactional migrations
 
-**`transaction = "forbidden"` is not implemented.** Nontransactional migrations
-— `CREATE INDEX CONCURRENTLY` and friends — are rejected at validation time with
-an explanation. The execution mode itself is straightforward; what it needs is
-the audited recovery path for an interrupted run, because a nontransactional
-statement that was cut off mid-flight leaves a state Zapadka cannot infer.
-Shipping the mode without that recovery would be worse than not shipping it.
+`CREATE INDEX CONCURRENTLY` and its relatives refuse to run inside a
+transaction. A migration can declare `transaction = "forbidden"` to run one —
+exactly one statement, so that an interrupted run has a single possible
+question rather than several.
+
+The transactional guarantee is genuinely unavailable here, and Zapadka does not
+pretend otherwise. What it does instead is **write down the attempt before the
+statement runs**, and commit that. So a run killed mid-statement leaves evidence
+naming what was in flight:
+
+```console
+$ zapadka deploy
+error: the connection failed while running migrations/.../deploy.sql, so whether
+       its statement took effect is unknown  [deploy.outcome_unknown]
+```
+
+The target is then **blocked**: every command that would act on it refuses,
+because a plan computed from applied state would be built on a gap. `status`
+still reports, since that is how you find out.
+
+Zapadka will not retry and will not guess. A `CREATE INDEX CONCURRENTLY` can
+finish after the client that asked for it is gone, and it can leave an invalid
+index behind — so both "assume it worked" and "assume it didn't" are wrong some
+of the time, expensively. Look at the database, then say what you found:
+
+```sh
+zapadka resolve <id> --applied      # it took effect; record it
+zapadka resolve <id> --not-applied  # it did not; let a deploy try again
+```
+
+The assertion is written to the append-only history as `asserted_applied` or
+`asserted_not_applied`, with the role that made it. A later reader can always
+tell a migration Zapadka watched succeed from one a person vouched for.
+
+`--not-applied` records a claim; it undoes nothing. If the statement half-ran,
+clean that up yourself first — only you can see what is safe to drop.
+
+## Limitations
 
 Deliberately out of scope for v1: Sqitch or pgTAP CLI/metadata compatibility,
 non-PostgreSQL databases, automatic rollback, declarative schema diffing,

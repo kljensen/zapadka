@@ -319,6 +319,11 @@
           "description": "Recorded the migration as applied without running its SQL.",
           "type": "string",
           "const": "baseline"
+        },
+        {
+          "description": "Recorded an operator's account of an interrupted nontransactional\nstatement, rather than something Zapadka observed.",
+          "type": "string",
+          "const": "resolve"
         }
       ]
     },

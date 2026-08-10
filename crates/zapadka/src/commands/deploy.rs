@@ -18,6 +18,7 @@
 use zapadka_core::config::LoadedConfig;
 use zapadka_core::error::{Error, Result};
 use zapadka_core::graph::Graph;
+use zapadka_core::manifest::Transaction;
 use zapadka_core::migration::Migration;
 use zapadka_core::report::{Action, MigrationResult, Script, ScriptRole, Status};
 use zapadka_pg::execute::Runner;
@@ -64,6 +65,7 @@ pub async fn run(
         args,
         session,
         client,
+        &opened.name,
         &opened.schema,
         opened.timeouts,
         opened.facts,
@@ -85,6 +87,7 @@ async fn deploy_under_lock(
     args: &DeployArgs,
     session: &mut Session,
     mut client: zapadka_pg::Client,
+    name: &str,
     schema: &str,
     timeouts: zapadka_pg::Timeouts,
     facts: zapadka_pg::ServerFacts,
@@ -111,6 +114,13 @@ async fn deploy_under_lock(
         )
         .await
     {
+        return (client, Err(error));
+    }
+
+    // Before planning. A plan is computed from applied state, and an unresolved
+    // attempt means applied state has a hole in it -- the plan would be built on
+    // an assumption nobody has checked.
+    if let Err(error) = target::require_not_blocked(&state, name) {
         return (client, Err(error));
     }
 
@@ -192,7 +202,15 @@ async fn apply_one(
     args: &DeployArgs,
     runner: &mut Runner,
 ) -> (MigrationResult, Option<Error>) {
-    let deployed = match runner.deploy(migration).await {
+    // Which path a migration takes is a property of the migration, decided by
+    // its manifest and validated long before this point.
+    let execution = if migration.manifest.transaction == Transaction::Forbidden {
+        runner.deploy_nontransactional(migration).await
+    } else {
+        runner.deploy(migration).await
+    };
+
+    let deployed = match execution {
         Ok(deployed) => deployed,
         Err(error) => {
             let mut result = result_of(migration, Action::Deploy, Status::Failed);

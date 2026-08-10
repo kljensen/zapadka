@@ -46,16 +46,16 @@ compiled into it.
 - Every command emits one versioned `ReportV1`; `--output json` writes exactly
   one document to stdout.
 
+- **Nontransactional migrations** (`transaction = "forbidden"`) run one
+  statement outside a transaction, for `CREATE INDEX CONCURRENTLY` and its
+  relatives. The attempt is recorded *before* the statement runs, so a run
+  killed mid-statement leaves evidence rather than a mystery; the target then
+  blocks until an operator records what actually happened with
+  `zapadka resolve`. Zapadka never retries such a statement on its own.
+
 ## What does not work yet
 
-**`transaction = "forbidden"`** — nontransactional migrations such as
-`CREATE INDEX CONCURRENTLY` — is rejected during validation with an
-explanation. What it needs is the audited recovery path for an interrupted run:
-a nontransactional statement cut off mid-flight leaves a state Zapadka cannot
-infer, and shipping the execution mode without that recovery would be worse
-than not shipping it.
-
-Also deliberately out of scope: Sqitch or pgTAP CLI compatibility,
+Deliberately out of scope: Sqitch or pgTAP CLI compatibility,
 non-PostgreSQL databases, automatic rollback, declarative schema diffing,
 repeatable migrations, callbacks, and multi-project registries.
 

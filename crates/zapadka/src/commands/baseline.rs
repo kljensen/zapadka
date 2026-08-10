@@ -75,6 +75,7 @@ pub async fn run(
         target_migration,
         session,
         client,
+        &opened.name,
         &opened.schema,
         opened.timeouts,
         opened.facts,
@@ -96,6 +97,7 @@ async fn baseline_under_lock(
     target_migration: &Migration,
     session: &mut Session,
     mut client: zapadka_pg::Client,
+    name: &str,
     schema: &str,
     timeouts: zapadka_pg::Timeouts,
     facts: zapadka_pg::ServerFacts,
@@ -107,6 +109,12 @@ async fn baseline_under_lock(
         Ok(state) => state,
         Err(error) => return (client, Err(error)),
     };
+
+    // Recording a closure as applied on top of an unresolved gap would write a
+    // history that claims more certainty than anyone has.
+    if let Err(error) = target::require_not_blocked(&state, name) {
+        return (client, Err(error));
+    }
 
     if let Err(error) = target::claim_and_upgrade(
         &mut client,

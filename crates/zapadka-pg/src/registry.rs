@@ -1,6 +1,6 @@
 //! Zapadka's registry: what a database records about its own migration history.
 //!
-//! Three tables in a reserved schema:
+//! Four tables in a reserved schema:
 //!
 //! - `meta` — one row, naming the project that owns this database and the
 //!   registry format version.
@@ -9,6 +9,9 @@
 //!   against.
 //! - `events` — append-only history. Every deploy, verify, revert, baseline,
 //!   and failure, with the diagnostics needed to explain it later.
+//! - `nontransactional_attempts` — normally empty. One row per statement that
+//!   was started outside a transaction and whose outcome nobody observed. A row
+//!   here blocks the target until a person resolves it.
 //!
 //! Splitting current state from history is deliberate. `status` must be a cheap
 //! read of a small table, while an incident review needs everything that ever
@@ -32,7 +35,7 @@ use zapadka_core::manifest::Transaction;
 use crate::error::registry_failed;
 
 /// The registry format this binary writes.
-pub const REGISTRY_FORMAT_VERSION: i32 = 1;
+pub const REGISTRY_FORMAT_VERSION: i32 = 2;
 
 /// One registry format version and the SQL that creates it.
 struct Upgrade {
@@ -45,10 +48,76 @@ struct Upgrade {
 /// Each entry moves the registry from the previous version to its own. They are
 /// applied in order inside one transaction, so a partially upgraded registry is
 /// not a state that can be observed.
-const UPGRADES: &[Upgrade] = &[Upgrade {
-    version: 1,
-    sql: initial_schema,
-}];
+const UPGRADES: &[Upgrade] = &[
+    Upgrade {
+        version: 1,
+        sql: initial_schema,
+    },
+    Upgrade {
+        version: 2,
+        sql: nontransactional_attempts,
+    },
+];
+
+/// The SQL moving a registry from format 1 to format 2.
+///
+/// A nontransactional migration cannot be wrapped in a transaction, so there is
+/// no way to make its SQL and the record that it ran commit together — the one
+/// guarantee everything else in Zapadka rests on. What can be done instead is
+/// to write down the intent *before* the statement runs, in its own committed
+/// transaction. Then an interrupted run is not a mystery: the row is still
+/// there afterwards, and it names exactly which statement was in flight.
+///
+/// The row is deliberately not a weaker `applied_migrations` entry. A migration
+/// is applied or it is not, and a statement whose outcome nobody observed is
+/// neither. Keeping it in its own table means no query that reads applied state
+/// has to remember to exclude a half-state.
+fn nontransactional_attempts(schema: &str) -> String {
+    format!(
+        r"
+-- One row per nontransactional statement that was started and has not been
+-- resolved. Normally empty.
+CREATE TABLE {schema}.nontransactional_attempts (
+    migration_id      uuid        PRIMARY KEY,
+    slug              text        NOT NULL,
+    definition_sha256 text        NOT NULL,
+    deploy_sha256     text        NOT NULL,
+    depends           uuid[]      NOT NULL,
+    started_at        timestamptz NOT NULL DEFAULT now(),
+    run_id            uuid        NOT NULL,
+    session_user_name text        NOT NULL,
+    server_version    text        NOT NULL,
+    zapadka_version   text        NOT NULL
+);
+
+COMMENT ON TABLE {schema}.nontransactional_attempts IS
+    'Nontransactional statements started but not resolved. A row here blocks '
+    'deployment: only a person can say whether the statement took effect. '
+    'Resolve it with `zapadka resolve`, never by deleting the row.';
+"
+    )
+}
+
+/// A nontransactional run that was started and never resolved.
+#[derive(Debug, Clone)]
+pub struct UnresolvedAttempt {
+    /// The migration whose statement was in flight.
+    pub id: Uuid,
+    /// Its slug at the time of the attempt.
+    pub slug: String,
+    /// The definition hash at the time of the attempt.
+    pub definition_sha256: String,
+    /// SHA-256 of the `deploy.sql` whose single statement was run.
+    pub deploy_sha256: String,
+    /// The dependency edges recorded with the attempt.
+    pub depends: Vec<Uuid>,
+    /// When the statement was started, as an RFC 3339 timestamp.
+    pub started_at: String,
+    /// The run that started it.
+    pub run_id: Uuid,
+    /// The role that started it.
+    pub session_user_name: String,
+}
 
 /// The SQL creating registry format version 1.
 fn initial_schema(schema: &str) -> String {
@@ -141,6 +210,12 @@ pub struct RegistryState {
     pub project_id: Option<Uuid>,
     /// Applied migrations, by id.
     pub applied: BTreeMap<Uuid, AppliedMigration>,
+    /// Nontransactional runs that were started and never resolved, by id.
+    ///
+    /// Empty is the normal state. A row here means a previous run wrote down
+    /// that it was about to run a statement it could not roll back, and never
+    /// came back to say what happened.
+    pub unresolved: BTreeMap<Uuid, UnresolvedAttempt>,
 }
 
 impl RegistryState {
@@ -411,6 +486,7 @@ pub async fn read(client: &Client, schema: &str) -> Result<RegistryState> {
             format_version: None,
             project_id: None,
             applied: BTreeMap::new(),
+            unresolved: BTreeMap::new(),
         });
     }
 
@@ -466,9 +542,31 @@ pub async fn read(client: &Client, schema: &str) -> Result<RegistryState> {
             format_version: None,
             project_id: None,
             applied: BTreeMap::new(),
+            unresolved: BTreeMap::new(),
         });
     }
 
+    let applied = read_applied(client, &quoted).await?;
+
+    // Format 1 registries predate the table. They cannot hold an unresolved
+    // attempt either, because the binaries that wrote them refused to run a
+    // nontransactional migration at all.
+    let unresolved = if format_version.is_some_and(|version| version >= 2) {
+        read_unresolved(client, &quoted).await?
+    } else {
+        BTreeMap::new()
+    };
+
+    Ok(RegistryState {
+        format_version,
+        project_id,
+        applied,
+        unresolved,
+    })
+}
+
+/// Reads the applied-migration rows.
+async fn read_applied(client: &Client, quoted: &str) -> Result<BTreeMap<Uuid, AppliedMigration>> {
     let rows = client
         .query(
             &format!(
@@ -481,7 +579,7 @@ pub async fn read(client: &Client, schema: &str) -> Result<RegistryState> {
         .await
         .map_err(|error| registry_failed(error, "read applied migrations"))?;
 
-    let applied = rows
+    Ok(rows
         .into_iter()
         .map(|row| {
             let migration = AppliedMigration {
@@ -495,13 +593,40 @@ pub async fn read(client: &Client, schema: &str) -> Result<RegistryState> {
             };
             (migration.id, migration)
         })
-        .collect();
+        .collect())
+}
 
-    Ok(RegistryState {
-        format_version,
-        project_id,
-        applied,
-    })
+/// Reads the nontransactional attempts nobody has resolved.
+async fn read_unresolved(
+    client: &Client,
+    quoted: &str,
+) -> Result<BTreeMap<Uuid, UnresolvedAttempt>> {
+    let rows = client
+        .query(
+            &format!(
+                "SELECT migration_id, slug, definition_sha256, deploy_sha256, depends,                         started_at::text, run_id, session_user_name                  FROM {quoted}.nontransactional_attempts ORDER BY started_at"
+            ),
+            &[],
+        )
+        .await
+        .map_err(|error| registry_failed(error, "read unresolved nontransactional attempts"))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let attempt = UnresolvedAttempt {
+                id: row.get(0),
+                slug: row.get(1),
+                definition_sha256: row.get(2),
+                deploy_sha256: row.get(3),
+                depends: row.get(4),
+                started_at: row.get(5),
+                run_id: row.get(6),
+                session_user_name: row.get(7),
+            };
+            (attempt.id, attempt)
+        })
+        .collect())
 }
 
 /// Creates or upgrades the registry to the version this binary writes.
@@ -590,6 +715,108 @@ pub fn check_project(state: &RegistryState, project_id: Uuid) -> Result<()> {
         )),
         _ => Ok(()),
     }
+}
+
+/// Records that a migration is now applied.
+/// Writes down that a nontransactional statement is about to run.
+///
+/// Committed on its own, before the statement runs. That ordering is the whole
+/// point: a statement that cannot be rolled back has to be preceded by durable
+/// evidence that it was attempted, or an interrupted run leaves nothing behind
+/// to distinguish "never started" from "may have finished".
+pub async fn record_attempt(
+    client: &tokio_postgres::Transaction<'_>,
+    schema: &str,
+    run_id: Uuid,
+    migration: &zapadka_core::migration::Migration,
+    facts: &ServerFacts,
+    zapadka_version: &str,
+) -> Result<()> {
+    let quoted = quote_identifier(schema);
+    let mut depends = migration.depends().to_vec();
+    depends.sort();
+
+    client
+        .execute(
+            &format!(
+                "INSERT INTO {quoted}.nontransactional_attempts \
+                    (migration_id, slug, definition_sha256, deploy_sha256, depends, run_id, \
+                     session_user_name, server_version, zapadka_version) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+            ),
+            &[
+                &migration.id,
+                &migration.slug,
+                &migration.definition_sha256,
+                &migration.deploy.sha256,
+                &depends,
+                &run_id,
+                &facts.session_user,
+                &facts.server_version,
+                &zapadka_version,
+            ],
+        )
+        .await
+        .map_err(|error| registry_failed(error, "record the nontransactional attempt"))?;
+    Ok(())
+}
+
+/// Removes the attempt row for a migration.
+///
+/// Called once the outcome is known: the statement succeeded, or the server
+/// refused it outright. An attempt whose outcome nobody observed is precisely
+/// the one that must *not* be cleared here.
+pub async fn clear_attempt(
+    client: &tokio_postgres::Transaction<'_>,
+    schema: &str,
+    migration_id: Uuid,
+) -> Result<()> {
+    let quoted = quote_identifier(schema);
+    client
+        .execute(
+            &format!("DELETE FROM {quoted}.nontransactional_attempts WHERE migration_id = $1"),
+            &[&migration_id],
+        )
+        .await
+        .map_err(|error| registry_failed(error, "clear the nontransactional attempt"))?;
+    Ok(())
+}
+
+/// Records an applied migration from a resolved attempt, without a `Migration`.
+///
+/// `zapadka resolve` may run in a checkout that no longer contains the
+/// migration, and the registry's own record of what was attempted is the more
+/// trustworthy source in any case: it is what the database saw.
+pub async fn record_applied_from_attempt(
+    client: &tokio_postgres::Transaction<'_>,
+    schema: &str,
+    run_id: Uuid,
+    attempt: &UnresolvedAttempt,
+) -> Result<()> {
+    let quoted = quote_identifier(schema);
+    let mut depends = attempt.depends.clone();
+    depends.sort();
+
+    client
+        .execute(
+            &format!(
+                "INSERT INTO {quoted}.applied_migrations \
+                    (migration_id, slug, definition_sha256, deploy_sha256, depends, \
+                     transaction_mode, run_id) \
+                 VALUES ($1, $2, $3, $4, $5, 'forbidden', $6)"
+            ),
+            &[
+                &attempt.id,
+                &attempt.slug,
+                &attempt.definition_sha256,
+                &attempt.deploy_sha256,
+                &depends,
+                &run_id,
+            ],
+        )
+        .await
+        .map_err(|error| registry_failed(error, "record the resolved migration as applied"))?;
+    Ok(())
 }
 
 /// Records that a migration is now applied.
@@ -723,6 +950,7 @@ mod tests {
             format_version: Some(REGISTRY_FORMAT_VERSION + 1),
             project_id: Some(Uuid::nil()),
             applied: BTreeMap::new(),
+            unresolved: BTreeMap::new(),
         };
         // `read` performs this check; the condition is asserted directly here
         // because constructing it needs no database.
@@ -737,6 +965,7 @@ mod tests {
             format_version: Some(1),
             project_id: Some(other),
             applied: BTreeMap::new(),
+            unresolved: BTreeMap::new(),
         };
         let error = check_project(&state, ours).unwrap_err();
         assert_eq!(error.code, ErrorCode::RegistryProjectMismatch);
@@ -755,6 +984,7 @@ mod tests {
             format_version: None,
             project_id: None,
             applied: BTreeMap::new(),
+            unresolved: BTreeMap::new(),
         };
         assert!(check_project(&state, Uuid::now_v7()).is_ok());
         assert!(!state.is_initialized());

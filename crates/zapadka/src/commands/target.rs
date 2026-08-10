@@ -231,6 +231,41 @@ pub fn require_initialized(state: &RegistryState, name: &str) -> Result<()> {
     .with_hint("run `zapadka deploy` to create the registry and apply migrations"))
 }
 
+/// Fails when a nontransactional statement's outcome was never resolved.
+///
+/// Every command that changes a target calls this. The reasoning is the same
+/// each time: the database is in a state Zapadka cannot describe. It does not
+/// know whether an index exists, so it does not know what the next migration
+/// would be running against, and a plan computed from applied state would be
+/// built on a gap. Blocking is the only answer that cannot make it worse.
+pub fn require_not_blocked(state: &RegistryState, name: &str) -> Result<()> {
+    let mut blocked: Vec<&zapadka_pg::registry::UnresolvedAttempt> =
+        state.unresolved.values().collect();
+    blocked.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+    let Some(attempt) = blocked.first() else {
+        return Ok(());
+    };
+
+    Err(Error::new(
+        ErrorCode::RegistryBlocked,
+        format!(
+            "target {name} has an unresolved nontransactional migration: {} {}",
+            zapadka_core::migration::short_id(attempt.id),
+            attempt.slug
+        ),
+    )
+    .with_context("migration_id", attempt.id)
+    .with_context("started_at", &attempt.started_at)
+    .with_context("started_by", &attempt.session_user_name)
+    .with_context("unresolved", blocked.len())
+    .with_hint(
+        "a statement that cannot be rolled back was started and its outcome was never observed. \
+         Look at the database and decide what actually happened, then say so with \
+         `zapadka resolve <id> --applied` or `--not-applied`. Zapadka will not guess, because \
+         both wrong answers are expensive.",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     // Assertions and unreachable branches in tests panic by design.
@@ -238,6 +273,7 @@ mod tests {
 
     use super::*;
     use camino::Utf8PathBuf;
+    use std::collections::BTreeMap;
     use zapadka_core::config::Config;
 
     fn project(targets: &str) -> LoadedConfig {
@@ -322,6 +358,7 @@ mod tests {
             format_version: None,
             project_id: None,
             applied: std::collections::BTreeMap::default(),
+            unresolved: BTreeMap::new(),
         };
         let error = require_initialized(&state, "production").unwrap_err();
         assert_eq!(error.code, ErrorCode::RegistryNotInitialized);

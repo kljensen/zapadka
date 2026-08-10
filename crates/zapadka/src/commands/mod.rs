@@ -9,6 +9,7 @@ pub mod deploy;
 pub mod init;
 pub mod lint;
 pub mod new;
+pub mod resolve;
 pub mod revert;
 pub mod status;
 pub mod target;
@@ -24,10 +25,12 @@ use zapadka_core::migration::discover;
 
 /// What this build can execute.
 ///
-/// Alpha ships the transactional slice, so a project that declares
-/// `transaction = "forbidden"` fails validation rather than failing partway
-/// through a deploy.
-pub const CAPABILITIES: Capabilities = Capabilities::TRANSACTIONAL_ONLY;
+/// Nontransactional migrations became executable once the recovery path they
+/// need existed: an attempt recorded before the statement runs, a target that
+/// blocks while an outcome is unknown, and `zapadka resolve` for the operator's
+/// account of what happened. The capability and that machinery ship together,
+/// because the execution mode without the recovery is the dangerous half.
+pub const CAPABILITIES: Capabilities = Capabilities::ALL;
 
 /// Loads the project and builds its validated migration graph.
 ///

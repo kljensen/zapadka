@@ -65,6 +65,9 @@ pub enum Command {
 
     /// Run database tests against a prepared test target.
     Test(TestArgs),
+
+    /// Record what happened to an interrupted nontransactional migration.
+    Resolve(ResolveArgs),
 }
 
 impl Command {
@@ -80,6 +83,7 @@ impl Command {
             Self::Revert(_) => "revert",
             Self::Baseline(_) => "baseline",
             Self::Test(_) => "test",
+            Self::Resolve(_) => "resolve",
         }
     }
 }
@@ -225,6 +229,38 @@ pub struct TestArgs {
     /// or to `tests/db`. A selector that matches nothing is an error.
     #[arg(value_name = "PATH")]
     pub files: Vec<String>,
+}
+
+/// `zapadka resolve` — the operator's account of an interrupted statement.
+///
+/// This is the only command that writes applied state from a human assertion
+/// rather than from something Zapadka observed. It exists because a
+/// nontransactional statement whose connection died leaves a question only a
+/// person can answer, and the alternative to answering it is a target nothing
+/// can deploy to.
+#[derive(Debug, Args)]
+pub struct ResolveArgs {
+    #[command(flatten)]
+    pub target: TargetArgs,
+
+    /// The interrupted migration, as an id, an id prefix, or a slug.
+    pub migration: String,
+
+    /// State that the statement did take effect. Records it as applied.
+    #[arg(long, conflicts_with = "not_applied")]
+    pub applied: bool,
+
+    /// State that the statement did not take effect. Allows a fresh deploy.
+    ///
+    /// This does not undo anything. If the statement half-ran -- an invalid
+    /// index is the usual case -- clean that up yourself first, because only
+    /// you can see what is safe to drop.
+    #[arg(long, conflicts_with = "applied")]
+    pub not_applied: bool,
+
+    /// How long to wait for the deployment lock.
+    #[arg(long, value_name = "DURATION", value_parser = parse_timeout)]
+    pub wait: Option<Timeout>,
 }
 
 /// Parses a `--wait` value, reporting the accepted spellings on failure.

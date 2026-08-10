@@ -127,6 +127,9 @@ async fn run_suite(
     // otherwise run against a schema nobody validated.
     let state = target::refresh_state(client, config, schema).await?;
     target::require_initialized(&state, name)?;
+    // A suite's results are only meaningful against a schema Zapadka can
+    // describe, and an unresolved attempt means it cannot.
+    target::require_not_blocked(&state, name)?;
 
     let plan = history::plan(graph, &state.applied)?;
     if !plan.pending.is_empty() {

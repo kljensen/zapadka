@@ -172,6 +172,9 @@ pub enum Action {
     Revert,
     /// Recorded the migration as applied without running its SQL.
     Baseline,
+    /// Recorded an operator's account of an interrupted nontransactional
+    /// statement, rather than something Zapadka observed.
+    Resolve,
 }
 
 /// The outcome of one migration's action.
