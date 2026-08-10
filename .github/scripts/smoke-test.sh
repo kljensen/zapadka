@@ -59,10 +59,24 @@ say "starting PostgreSQL 18"
 docker network create "$NETWORK" >/dev/null
 docker run -d --name "$CONTAINER" --network "$NETWORK" --network-alias db \
   -e POSTGRES_PASSWORD=smoke -e POSTGRES_DB=app "$POSTGRES_IMAGE" >/dev/null
+# `pg_isready` says yes during initialisation, while the entrypoint is running
+# a temporary server to create the database -- so it goes true before `app`
+# exists, and the first real query then fails with "database does not exist".
+# Waiting on the query this script actually needs is the only signal that means
+# anything here.
+ready=""
 for _ in $(seq 1 60); do
-  docker exec "$CONTAINER" pg_isready -q -U postgres && break
+  if docker exec "$CONTAINER" psql -U postgres -d app -tAc "SELECT 1" >/dev/null 2>&1; then
+    ready=yes
+    break
+  fi
   sleep 1
 done
+if [ -z "$ready" ]; then
+  echo "PostgreSQL did not accept a connection to app within 60s" >&2
+  docker logs "$CONTAINER" >&2
+  exit 1
+fi
 docker exec "$CONTAINER" psql -U postgres -d app -tAc "SELECT version()"
 
 say "version"
@@ -76,9 +90,21 @@ zapadka new create-orders
 zapadka new add-order-status
 
 # Fill in the generated skeletons. The directory names carry generated UUIDs,
-# so they are discovered rather than assumed.
-FIRST="$(ls "$WORKDIR/migrations" | grep create-orders)"
-SECOND="$(ls "$WORKDIR/migrations" | grep add-order-status)"
+# so they are discovered rather than assumed. A directory is '<uuid>-<slug>',
+# which makes the slug a suffix glob -- and a glob that matched nothing would
+# otherwise expand to itself and produce a confusing error several lines later.
+migration_dir() {
+  for dir in "$WORKDIR"/migrations/*-"$1"; do
+    if [ -d "$dir" ]; then
+      basename "$dir"
+      return 0
+    fi
+  done
+  echo "zapadka new did not create a migration for $1" >&2
+  return 1
+}
+FIRST="$(migration_dir create-orders)"
+SECOND="$(migration_dir add-order-status)"
 
 cat > "$WORKDIR/migrations/$FIRST/deploy.sql" <<'SQL'
 CREATE SCHEMA app;
