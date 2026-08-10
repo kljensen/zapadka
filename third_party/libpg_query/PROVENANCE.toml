@@ -1,0 +1,47 @@
+# Provenance for third-party source vendored into the Zapadka binary.
+#
+# Every file listed in SHA256SUMS is an unmodified upstream file. Zapadka never
+# patches vendored sources: a needed change must be sent upstream or expressed
+# in Zapadka's own code. `cargo xtask verify-fixtures` re-hashes this tree and
+# fails on any missing, modified, or unrecorded file.
+
+format_version = 1
+
+[source]
+id = "libpg_query"
+upstream = "https://github.com/pganalyze/libpg_query"
+release = "18.0.0"
+release_url = "https://github.com/pganalyze/libpg_query/releases/tag/18.0.0"
+revision = "204fbdbd3ed5f8691ab358e49f1fc5397b4679e2"
+classification = "exact"
+
+# SHA-256 of the upstream release archive these files were extracted from, as
+# published in the upstream release notes.
+archive = "libpg_query-18.0.0.tar.gz"
+archive_sha256 = "6ad7783f272acfd116455c66a03298a0cac9a9168281df547969219112f0260f"
+
+# SHA-256 of the SHA256SUMS file that records each vendored file's own hash.
+files_sha256 = "17cbe9d803b9dc48824098dbe0e4d00d9b34a1bee2cdf3dea8524310b41e1531"
+file_count = 623
+
+# libpg_query is BSD-3-Clause; the embedded PostgreSQL sources under
+# src/postgres carry the PostgreSQL License (see src/postgres/COPYRIGHT).
+license = "BSD-3-Clause AND PostgreSQL"
+license_file = "LICENSE"
+
+purpose = """
+Provides the PostgreSQL 18 grammar Zapadka uses to decide whether a migration,
+verification, or test script tries to take over the runner's transaction
+boundary, how many top-level statements a nontransactional migration contains,
+and which statements `lint` should warn about. ADR-0002 requires parser fidelity
+with the supported PostgreSQL version, and ADR-0005 requires the parser to be
+statically embedded rather than dynamically linked.
+"""
+
+# The upstream tree also ships a C++ protobuf binding, a pg_regress-style test
+# suite, and generated srcdata. Zapadka vendors only what its build compiles:
+# the upstream Makefile's SRC_FILES list plus the headers those files include.
+subset = """
+LICENSE, pg_query.h, postgres_deparse.h, src/**, protobuf/pg_query.pb-c.{c,h},
+vendor/protobuf-c/**, vendor/xxhash/**
+"""

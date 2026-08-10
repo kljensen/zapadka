@@ -1,0 +1,23 @@
+[package]
+name = "zapadka-pg"
+description = "Zapadka PostgreSQL 18 adapter: connections, registry, and runner-owned execution."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+zapadka-core = { workspace = true }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = "1.15.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tokio-postgres = { workspace = true }
+tokio-postgres-rustls = { workspace = true }
+uuid = { workspace = true }
+webpki-roots = "1.0.9"
