@@ -356,7 +356,7 @@
           "const": "skipped"
         },
         {
-          "description": "Applied, but its outcome on the server is unknown and must be resolved\nby an operator before deployment can continue.",
+          "description": "Started outside a transaction and never resolved: whether it took\neffect is unknown, and an operator must say which before deployment can\ncontinue. Deliberately neither `Applied` nor `Pending`, because it is\nthe absence of that answer that the status exists to report.",
           "type": "string",
           "const": "blocked"
         }

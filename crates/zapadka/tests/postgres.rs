@@ -1719,6 +1719,15 @@ fn an_unresolved_attempt_blocks_deploys_until_it_is_resolved() {
     let status = project.report(&["status", "--uri", &db.uri()]);
     status.assert_success();
     assert!(status.diagnostic_codes().contains(&"target.blocked"));
+    // And says so in the structured report, not only in a warning. It is
+    // neither applied nor pending, and calling it either would be a lie
+    // automation would act on.
+    assert_eq!(status.slugs_with_status("blocked"), ["add-index"]);
+    assert!(
+        !status.slugs_with_status("pending").contains(&"add-index"),
+        "a blocked migration must not also be listed as pending: {:?}",
+        status.slugs_with_status("pending")
+    );
 
     // The operator looks, decides the index is not there, and says so.
     let resolved = project.report(&[
