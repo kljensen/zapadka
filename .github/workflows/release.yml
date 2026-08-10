@@ -40,17 +40,7 @@ jobs:
       # glibc build cross-compiled and hoped about. Pinning by digest means a
       # rebuild of the same tag produces the same binary.
       - name: Build in a pinned musl container
-        run: |
-          docker run --rm --platform ${{ matrix.platform }} \
-            -v "$PWD:/src" -w /src \
-            rust@sha256:${{ env.RUST_ALPINE_DIGEST }} \
-            sh -euc '
-              apk add --no-cache musl-dev build-base >/dev/null
-              cargo build --release --locked --target ${{ matrix.target }} -p zapadka
-            '
-        env:
-          # rust:1.89-alpine
-          RUST_ALPINE_DIGEST: ${{ vars.RUST_ALPINE_DIGEST }}
+        run: .github/scripts/build-musl.sh "${{ matrix.target }}" "${{ matrix.platform }}"
 
       # ADR-0005 requires a binary with no dynamic database-client dependency.
       # An ELF with no NEEDED entries proves it rather than asserting it.
@@ -63,6 +53,24 @@ jobs:
             readelf -d "$binary" | grep NEEDED
             exit 1
           fi
+
+      # "Reproducible" is a claim until something checks it. The second build
+      # starts from a clean target directory, so anything that leaked into the
+      # binary from the build environment -- a timestamp, a path, a hostname --
+      # shows up here rather than in a user's diff of two releases.
+      - name: Prove the build is reproducible
+        run: |
+          first="$(sha256sum target/${{ matrix.target }}/release/zapadka | cut -d' ' -f1)"
+          mv target "target-first-build"
+          .github/scripts/build-musl.sh "${{ matrix.target }}" "${{ matrix.platform }}"
+          second="$(sha256sum target/${{ matrix.target }}/release/zapadka | cut -d' ' -f1)"
+          rm -rf target
+          mv target-first-build target
+          if [ "$first" != "$second" ]; then
+            echo "::error::the build is not reproducible: $first != $second"
+            exit 1
+          fi
+          echo "two independent builds produced $first"
 
       - name: Smoke test against PostgreSQL 18
         run: .github/scripts/smoke-test.sh target/${{ matrix.target }}/release/zapadka
