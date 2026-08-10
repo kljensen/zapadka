@@ -1,0 +1,155 @@
+# Provenance for Zapadka-owned test scenarios adapted from other tools.
+#
+# These are not vendored files. Every scenario listed here is written from
+# scratch against Zapadka's own model, and this file records where the *idea*
+# came from so a reader can go and check the original.
+#
+# The distinction matters. Sqitch, Flyway, Atlas, Liquibase and the rest have
+# different metadata, different registries, and different guarantees. Copying
+# their fixtures literally would create the appearance of compatibility Zapadka
+# does not offer and does not want. What is worth borrowing is the *question*
+# each of their tests asks -- those questions were learned from production
+# incidents, and they are as relevant to Zapadka as to the tool that first
+# asked them.
+#
+# `cargo xtask verify-fixtures` does not hash these: they are Zapadka's own
+# code and change whenever Zapadka does. It hashes `third_party/`, where the
+# exact upstream files live.
+
+format_version = 1
+
+[[scenario]]
+name = "transactional rollback leaves neither schema nor applied state"
+test = "crates/zapadka/tests/postgres.rs::a_failing_migration_rolls_back_its_own_sql_and_its_applied_state"
+inspired_by = "Sqitch t/engine.t, Flyway's transactional migration tests"
+source = "https://github.com/sqitchers/sqitch"
+classification = "adapted"
+question = """
+When a migration's SQL fails partway through, is the database left with half of
+it applied, and does the tool still believe the migration succeeded?
+"""
+
+[[scenario]]
+name = "an edited deployed migration is a hard failure"
+test = "crates/zapadka/tests/postgres.rs::editing_a_deployed_migration_is_a_hard_history_failure"
+inspired_by = "Flyway checksum validation; Atlas migration directory integrity"
+source = "https://atlasgo.io/versioned/lint"
+classification = "adapted"
+question = """
+If someone edits a migration that has already run, does the tool notice, or does
+it silently accept a history that no longer describes the database?
+"""
+
+[[scenario]]
+name = "advisory-lock contention names the holder"
+test = "crates/zapadka/tests/postgres.rs::a_second_deployer_cannot_run_while_the_lock_is_held"
+inspired_by = "Sqitch's PostgreSQL advisory lock; Flyway's migration lock"
+source = "https://github.com/sqitchers/sqitch"
+classification = "adapted"
+question = """
+When two deployers run at once, does the second wait, fail, or interleave? And
+can an operator tell which of those happened?
+"""
+
+[[scenario]]
+name = "dependency ordering and multi-head convergence"
+test = "crates/zapadka/tests/postgres.rs::converges_two_graph_heads_deterministically"
+inspired_by = "Sqitch plan dependencies"
+source = "https://sqitch.org/docs/manual/sqitchchanges/"
+classification = "adapted"
+question = """
+When two branches each add migrations, can they be merged without renumbering,
+and is the resulting order the same on every machine?
+"""
+
+[[scenario]]
+name = "verification runs after commit and rolls back"
+test = "crates/zapadka/tests/postgres.rs::verification_runs_after_commit_and_always_rolls_back"
+inspired_by = "Sqitch verify scripts"
+source = "https://sqitch.org/docs/manual/sqitch-verify/"
+classification = "adapted"
+question = """
+Does a verification script see the state the migration actually committed, and
+can it leave anything behind if it tries?
+"""
+
+[[scenario]]
+name = "a failed verification does not trigger an automatic revert"
+test = "crates/zapadka/tests/postgres.rs::a_failed_verification_leaves_the_migration_applied_and_never_reverts"
+inspired_by = "Sqitch, which reverts on a failed verify -- deliberately inverted"
+source = "https://sqitch.org/docs/manual/sqitch-deploy/"
+classification = "adapted"
+question = """
+Sqitch reverts a change whose verification fails. Zapadka does the opposite, on
+the grounds that running unproven revert SQL against an unexpected schema while
+nobody is watching is worse than stopping. This scenario pins the difference so
+it stays a decision rather than a drift.
+"""
+
+[[scenario]]
+name = "revert acts only on a reversible applied leaf"
+test = "crates/zapadka/tests/postgres.rs::refuses_to_revert_a_migration_something_applied_depends_on"
+inspired_by = "Liquibase rollback testing; Sqitch revert"
+source = "https://docs.liquibase.com/workflows/liquibase-community/using-rollback.html"
+classification = "adapted"
+question = """
+Can a revert be asked to undo something other migrations still depend on, and
+does the tool cascade or refuse?
+"""
+
+[[scenario]]
+name = "baseline records a closure without executing SQL"
+test = "crates/zapadka/tests/postgres.rs::baseline_records_a_closure_without_running_any_sql"
+inspired_by = "Flyway baseline; Sqitch's --log-only deploy"
+source = "https://documentation.red-gate.com/fd/baseline-184127465.html"
+classification = "adapted"
+question = """
+When adopting a database that already has the schema, does the tool run the
+historical SQL anyway, and does it claim to have verified that the schema
+matches?
+"""
+
+[[scenario]]
+name = "a dry run has no user-SQL or registry effects"
+test = "crates/zapadka/tests/postgres.rs::a_dry_run_reports_the_plan_and_changes_nothing"
+inspired_by = "golang-migrate and dbmate dry-run behaviour"
+source = "https://github.com/golang-migrate/migrate"
+classification = "adapted"
+question = """
+Does a dry run change anything at all -- including creating the tool's own
+bookkeeping tables on a database nobody has deployed to yet?
+"""
+
+[[scenario]]
+name = "top-level transaction control is rejected before connecting"
+test = "crates/zapadka/tests/postgres.rs::invalid_sql_is_rejected_before_zapadka_connects"
+inspired_by = "Sqitch's requirement that changes not manage transactions"
+source = "https://sqitch.org/docs/manual/sqitchtutorial/"
+classification = "adapted"
+question = """
+If a migration script commits or rolls back on its own, does the tool notice
+before it reaches production, or after?
+"""
+
+[[scenario]]
+name = "test files cannot see each other's data"
+test = "crates/zapadka/tests/postgres.rs::a_test_file_cannot_leave_anything_behind"
+inspired_by = "pgTAP's pg_regress suite, which uses explicit BEGIN/ROLLBACK per file"
+source = "https://pgtap.org/documentation.html"
+classification = "adapted"
+question = """
+Can one test file's writes make another file pass? pgTAP's own suite achieves
+isolation by having each file manage its own transaction; Zapadka achieves it by
+owning the transaction, so a file cannot opt out.
+"""
+
+[[scenario]]
+name = "a test file with no plan fails rather than passing"
+test = "crates/zapadka/tests/postgres.rs::a_test_file_with_no_plan_is_a_failure_not_a_pass"
+inspired_by = "Test::Harness TAP semantics"
+source = "https://testanything.org/tap-version-13-specification.html"
+classification = "adapted"
+question = """
+A file whose SQL dies partway through emits some passing results and no plan.
+Does the harness call that a pass?
+"""

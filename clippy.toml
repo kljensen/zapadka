@@ -1,0 +1,23 @@
+# Complexity budgets.
+#
+# These are the thresholds at which a function stops being readable in one
+# sitting. They are deliberately tighter than clippy's defaults: Zapadka's
+# correctness argument depends on a reader being able to follow what a deploy
+# does, statement by statement.
+#
+# `cargo xtask quality` reports the same metrics from an independent tool
+# (rust-code-analysis) so the budgets are checked even where clippy's own
+# heuristics do not fire.
+
+# clippy's default is 25, which is well past the point of needing a diagram.
+cognitive-complexity-threshold = 15
+
+# A function needing more than this many inputs usually wants a struct.
+too-many-arguments-threshold = 7
+
+# Nested generics past this depth want a type alias.
+type-complexity-threshold = 250
+
+# Zapadka supports PostgreSQL 18 only; there is no reason to accept an older
+# toolchain than the one the workspace declares.
+msrv = "1.89"

@@ -1,0 +1,19 @@
+[package]
+name = "zapadka-parser"
+description = "Narrow internal FFI boundary over a pinned PostgreSQL 18 libpg_query parser."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[build-dependencies]
+cc = "1.2"
+
+[lints]
+workspace = true

@@ -1,0 +1,5 @@
+# `cargo xtask` is not a Cargo feature; it is an alias by convention. Without
+# this file the command does not exist, and every place that documents it --
+# CI, the README, docs/development/code-quality.md -- is wrong.
+[alias]
+xtask = "run --quiet --package xtask --"

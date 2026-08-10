@@ -1,0 +1,731 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReportV1",
+  "description": "One command run.",
+  "type": "object",
+  "properties": {
+    "report_version": {
+      "description": "Always `1` for this model. Consumers should refuse versions they do not\nknow rather than guessing.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "tool": {
+      "description": "What produced this report.",
+      "$ref": "#/$defs/Tool"
+    },
+    "run": {
+      "description": "Identity and timing of this run.",
+      "$ref": "#/$defs/Run"
+    },
+    "outcome": {
+      "description": "Whether the command achieved what it was asked to do.",
+      "$ref": "#/$defs/Outcome"
+    },
+    "exit_code": {
+      "description": "The process exit code that accompanies this report.",
+      "type": "integer",
+      "format": "int32"
+    },
+    "target": {
+      "description": "The target database, when the command connected to one.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Target"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "migrations": {
+      "description": "The migrations this command planned or acted on, in execution order.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MigrationResult"
+      }
+    },
+    "tests": {
+      "description": "Database test files, in execution order. Empty outside `zapadka test`.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TestFile"
+      }
+    },
+    "diagnostics": {
+      "description": "Warnings and notes that did not by themselves fail the run.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Diagnostic"
+      }
+    },
+    "error": {
+      "description": "Why the run failed. Present if and only if `outcome` is `failure`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReportError"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "report_version",
+    "tool",
+    "run",
+    "outcome",
+    "exit_code"
+  ],
+  "$defs": {
+    "Tool": {
+      "description": "What produced the report.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Always `zapadka`.",
+          "type": "string"
+        },
+        "version": {
+          "description": "The Zapadka release, e.g. `0.1.0`.",
+          "type": "string"
+        },
+        "parser_version": {
+          "description": "The embedded PostgreSQL parser's `PG_VERSION_NUM`, e.g. `180004`.\n\nRecorded because a parser decision — accepting or rejecting a script — is\nonly reproducible against a specific parser build.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "parser_version"
+      ]
+    },
+    "Run": {
+      "description": "Identity and timing of a single run.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "A UUIDv7 identifying this run. The same id appears on every registry\nevent the run wrote, so a report can be joined to database history.",
+          "type": "string",
+          "format": "uuid"
+        },
+        "command": {
+          "description": "The command that ran, e.g. `deploy`.",
+          "type": "string"
+        },
+        "started_at": {
+          "description": "When the run started, RFC 3339 in UTC.",
+          "type": "string"
+        },
+        "finished_at": {
+          "description": "When the run finished, RFC 3339 in UTC.",
+          "type": "string"
+        },
+        "duration_ms": {
+          "description": "Wall-clock duration in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "command",
+        "started_at",
+        "finished_at",
+        "duration_ms"
+      ]
+    },
+    "Outcome": {
+      "description": "Whether a run or step achieved its goal.",
+      "oneOf": [
+        {
+          "description": "The command did what it was asked to do.",
+          "type": "string",
+          "const": "success"
+        },
+        {
+          "description": "The command did not. `error` explains why.",
+          "type": "string",
+          "const": "failure"
+        }
+      ]
+    },
+    "Target": {
+      "description": "Facts observed about the target database.\n\nZapadka records only what it observed or was explicitly given. It never\nguesses an operator's identity, hostname, or Git revision.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The target name from `zapadka.toml`, e.g. `production`.",
+          "type": "string"
+        },
+        "database": {
+          "description": "The database that was connected to. Never includes credentials.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "server_version": {
+          "description": "`server_version` as reported by PostgreSQL, e.g. `18.4`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_user": {
+          "description": "`session_user` at connection time.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "current_user": {
+          "description": "`current_user` at connection time.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "registry_schema": {
+          "description": "The schema holding Zapadka's registry.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "registry_format_version": {
+          "description": "The registry format version found, before any upgrade this run applied.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "lock_timeout": {
+          "description": "The effective `lock_timeout` Zapadka applied, when the target set one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "statement_timeout": {
+          "description": "The effective `statement_timeout` Zapadka applied, when the target set\none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "MigrationResult": {
+      "description": "What happened to one migration during this run.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The migration's permanent UUIDv7 identity.",
+          "type": "string",
+          "format": "uuid"
+        },
+        "slug": {
+          "description": "The human-readable slug from its directory name.",
+          "type": "string"
+        },
+        "action": {
+          "description": "What the run did, or intended to do, with this migration.",
+          "$ref": "#/$defs/Action"
+        },
+        "status": {
+          "description": "The result of that action.",
+          "$ref": "#/$defs/Status"
+        },
+        "transaction": {
+          "description": "The execution mode the manifest declared.",
+          "$ref": "#/$defs/TransactionMode"
+        },
+        "definition_sha256": {
+          "description": "SHA-256 of the immutable deployment definition: the canonical manifest\nplus `deploy.sql`. This is what history integrity is checked against.",
+          "type": "string"
+        },
+        "scripts": {
+          "description": "The scripts this action ran, in execution order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Script"
+          }
+        },
+        "duration_ms": {
+          "description": "Wall-clock duration in milliseconds. Absent for planned-only entries.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "error": {
+          "description": "Why this migration failed, when it did.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReportError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "slug",
+        "action",
+        "status",
+        "transaction",
+        "definition_sha256"
+      ]
+    },
+    "Action": {
+      "description": "The operation a run performed on a migration.",
+      "oneOf": [
+        {
+          "description": "Selected for execution but not executed, as in `--dry-run` and `status`.",
+          "type": "string",
+          "const": "plan"
+        },
+        {
+          "description": "Applied the migration's `deploy.sql`.",
+          "type": "string",
+          "const": "deploy"
+        },
+        {
+          "description": "Ran the migration's `verify.sql` against committed state.",
+          "type": "string",
+          "const": "verify"
+        },
+        {
+          "description": "Applied the migration's `revert.sql`.",
+          "type": "string",
+          "const": "revert"
+        },
+        {
+          "description": "Recorded the migration as applied without running its SQL.",
+          "type": "string",
+          "const": "baseline"
+        }
+      ]
+    },
+    "Status": {
+      "description": "The outcome of one migration's action.",
+      "oneOf": [
+        {
+          "description": "Already applied; the run had nothing to do.",
+          "type": "string",
+          "const": "applied"
+        },
+        {
+          "description": "Not applied, and this run did not apply it.",
+          "type": "string",
+          "const": "pending"
+        },
+        {
+          "description": "This run applied or verified it successfully.",
+          "type": "string",
+          "const": "succeeded"
+        },
+        {
+          "description": "This run attempted it and it failed.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "Selected but deliberately not run, e.g. after an earlier failure.",
+          "type": "string",
+          "const": "skipped"
+        },
+        {
+          "description": "Applied, but its outcome on the server is unknown and must be resolved\nby an operator before deployment can continue.",
+          "type": "string",
+          "const": "blocked"
+        }
+      ]
+    },
+    "TransactionMode": {
+      "description": "How a migration's SQL is executed.",
+      "oneOf": [
+        {
+          "description": "Runs inside a transaction Zapadka opens and closes.",
+          "type": "string",
+          "const": "required"
+        },
+        {
+          "description": "Runs outside any transaction, for statements PostgreSQL forbids in one.",
+          "type": "string",
+          "const": "forbidden"
+        }
+      ]
+    },
+    "Script": {
+      "description": "One script execution.",
+      "type": "object",
+      "properties": {
+        "role": {
+          "description": "Which script this was.",
+          "$ref": "#/$defs/ScriptRole"
+        },
+        "path": {
+          "description": "Project-relative path, e.g. `migrations/019.../deploy.sql`.",
+          "type": "string"
+        },
+        "sha256": {
+          "description": "SHA-256 of the exact bytes executed. Recorded even for mutable scripts\nso a past run can be reproduced.",
+          "type": "string"
+        },
+        "status": {
+          "description": "The result of running it.",
+          "$ref": "#/$defs/Status"
+        },
+        "duration_ms": {
+          "description": "Wall-clock duration in milliseconds.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "error": {
+          "description": "Why it failed, when it did.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReportError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "role",
+        "path",
+        "sha256",
+        "status"
+      ]
+    },
+    "ScriptRole": {
+      "description": "Which of a migration's scripts ran.",
+      "oneOf": [
+        {
+          "description": "`deploy.sql`, the immutable script that applies the migration.",
+          "type": "string",
+          "const": "deploy"
+        },
+        {
+          "description": "`revert.sql`, the mutable script that undoes it.",
+          "type": "string",
+          "const": "revert"
+        },
+        {
+          "description": "`verify.sql`, the mutable script that checks it, always rolled back.",
+          "type": "string",
+          "const": "verify"
+        }
+      ]
+    },
+    "ReportError": {
+      "description": "A failure, as it appears in a report.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "The stable dotted error code, e.g. `history.definition_changed`.",
+          "type": "string"
+        },
+        "message": {
+          "description": "One sentence describing what went wrong.",
+          "type": "string"
+        },
+        "sqlstate": {
+          "description": "PostgreSQL's `SQLSTATE`, when the failure came from the server.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detail": {
+          "description": "PostgreSQL's `DETAIL`, when present.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hint": {
+          "description": "What to do about it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "location": {
+          "description": "Where in the project the problem is.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Location"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "context": {
+          "description": "Additional structured facts, such as expected and actual hashes.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "Location": {
+      "description": "A position in a project file.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Project-relative path.",
+          "type": "string"
+        },
+        "line": {
+          "description": "1-based line, when known.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "column": {
+          "description": "1-based column in characters, when known.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "TestFile": {
+      "description": "One database test file's result.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Project-relative path, e.g. `tests/db/orders.sql`.",
+          "type": "string"
+        },
+        "sha256": {
+          "description": "SHA-256 of the file as executed.",
+          "type": "string"
+        },
+        "status": {
+          "description": "Whether every assertion in the file passed.",
+          "$ref": "#/$defs/Status"
+        },
+        "assertions": {
+          "description": "Assertions in the order the file emitted them.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Assertion"
+          }
+        },
+        "planned": {
+          "description": "The plan the file declared, when it declared a count.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "duration_ms": {
+          "description": "Wall-clock duration in milliseconds.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "error": {
+          "description": "Why the file failed as a whole, e.g. a SQL error or malformed TAP.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReportError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "status"
+      ]
+    },
+    "Assertion": {
+      "description": "One assertion within a test file.",
+      "type": "object",
+      "properties": {
+        "number": {
+          "description": "1-based position within the file.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "description": {
+          "description": "The assertion's description, when it gave one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "Whether it passed.",
+          "$ref": "#/$defs/AssertionStatus"
+        },
+        "directive_reason": {
+          "description": "The reason attached to a `TODO` or `SKIP` directive.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "diagnostics": {
+          "description": "Diagnostic fields the assertion attached, such as `have` and `want`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "number",
+        "status"
+      ]
+    },
+    "AssertionStatus": {
+      "description": "The result of a single assertion.",
+      "oneOf": [
+        {
+          "description": "The assertion held.",
+          "type": "string",
+          "const": "passed"
+        },
+        {
+          "description": "The assertion did not hold, and it was not marked `TODO`.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "Failed, but marked `TODO`, so it does not fail the file.",
+          "type": "string",
+          "const": "todo_failed"
+        },
+        {
+          "description": "Passed while marked `TODO`, which usually means the `TODO` is stale.",
+          "type": "string",
+          "const": "todo_passed"
+        },
+        {
+          "description": "Not run, because it was marked `SKIP`.",
+          "type": "string",
+          "const": "skipped"
+        }
+      ]
+    },
+    "Diagnostic": {
+      "description": "A warning or note that did not by itself fail the run.",
+      "type": "object",
+      "properties": {
+        "severity": {
+          "description": "How seriously to take it.",
+          "$ref": "#/$defs/Severity"
+        },
+        "code": {
+          "description": "A stable dotted identifier, e.g. `lint.destructive_drop`. Suppressions\nand policy promotion both key on this.",
+          "type": "string"
+        },
+        "message": {
+          "description": "One sentence describing the concern.",
+          "type": "string"
+        },
+        "migration_id": {
+          "description": "The migration it concerns, when it concerns one.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "location": {
+          "description": "Where in the project it is.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Location"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hint": {
+          "description": "What to do about it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "severity",
+        "code",
+        "message"
+      ]
+    },
+    "Severity": {
+      "description": "How seriously to take a diagnostic.",
+      "oneOf": [
+        {
+          "description": "Provably invalid. Always fails the command.",
+          "type": "string",
+          "const": "error"
+        },
+        {
+          "description": "An intentional operational risk. Fails only when policy promotes it.",
+          "type": "string",
+          "const": "warning"
+        },
+        {
+          "description": "Informational.",
+          "type": "string",
+          "const": "note"
+        }
+      ]
+    }
+  }
+}

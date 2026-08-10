@@ -1,0 +1,81 @@
+# Provenance for the pgTAP assertion library shipped inside the Zapadka binary.
+#
+# `cargo xtask verify-fixtures` re-hashes this tree and fails on any missing,
+# modified, or unrecorded file. Vendored files are never edited in place; the
+# transformation Zapadka applies is described under [artifact] below and is
+# performed at install time, not by editing the source.
+
+format_version = 1
+
+[source]
+id = "pgtap"
+upstream = "https://github.com/theory/pgtap"
+release = "v1.3.4"
+release_url = "https://github.com/theory/pgtap/releases/tag/v1.3.4"
+revision = "968eb53a33114e83042b3bdb0c664b5b80cf8bdf"
+classification = "exact"
+
+archive = "pgtap-1.3.4.tar.gz"
+archive_sha256 = "d2c951afb296a001d21785611a8e966e3f8fa3f5bfbd929396a5130c0152f314"
+
+files_sha256 = "2f3618b610275b54879bda92af3b5e6191f5ebfcd55c9ecfb39f2e8e01c0288f"
+file_count = 4
+
+license = "PostgreSQL"
+license_file = "README.md"
+
+purpose = """
+Provides the SQL assertion API `zapadka test` runs. ADR-0004 requires the test
+framework to be embedded in the binary rather than installed separately, so that
+a test target needs no extension and a deploy target needs no test framework at
+all.
+"""
+
+subset = """
+sql/pgtap.sql.in is the only file Zapadka executes. README.md carries the
+copyright and licence notice, META.json carries the author's own licence
+declaration, and pgtap.control records the upstream version. Everything else in
+the release -- the pg_regress suite, documentation, per-version upgrade scripts,
+and compatibility patches for PostgreSQL 9.x -- is not used: Zapadka installs
+one version into one schema on PostgreSQL 18 and never upgrades an existing
+installation in place.
+"""
+
+# Recorded because it is a real ambiguity a reader will otherwise trip over.
+license_note = """
+The licence is recorded as PostgreSQL, which is what META.json declares.
+
+README.md carries a notice with the same terms as the PostgreSQL Licence but
+naming David E. Wheeler in place of the PostgreSQL Global Development Group.
+The two agree in substance -- permission to use, copy, modify, and distribute
+without fee, with the notice preserved, and with warranties disclaimed -- and
+differ only in whose name appears.
+
+Zapadka resolves this conservatively: it treats the terms as the PostgreSQL
+Licence, and ships README.md verbatim so the notice the author actually wrote
+travels with the code rather than being paraphrased.
+"""
+
+[artifact]
+# The upstream Makefile builds the installable SQL from `sql/pgtap.sql.in` by
+# applying compatibility patches for old PostgreSQL versions and substituting
+# three placeholders. Zapadka supports PostgreSQL 18 only, so none of the
+# patches apply -- every one is gated on a 9.x version -- and MODULE_PATHNAME
+# does not occur in this release. That leaves two substitutions, which Zapadka
+# performs itself rather than shelling out to make.
+substitutions = ["__VERSION__", "__OS__"]
+
+# `__VERSION__` becomes pgTAP's own major.minor, as `pgtap_version()` returns it.
+version = "1.3"
+
+# `__OS__` becomes the *server's* operating system, derived from the server's
+# own version() string. Upstream's Makefile uses the build machine's `uname`,
+# which would be wrong here: Zapadka frequently runs on one operating system
+# and installs into a database on another.
+os_source = "server version() string"
+
+# This release contains no `LANGUAGE C` functions and no `@extschema@`
+# references, which is what lets Zapadka install it into an ordinary schema
+# without a shared library and without CREATE EXTENSION.
+requires_shared_library = false
+requires_extension = false

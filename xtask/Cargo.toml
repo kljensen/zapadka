@@ -1,0 +1,21 @@
+[package]
+name = "xtask"
+description = "Repository automation: fixture provenance verification and schema generation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+zapadka-core = { workspace = true }
+anyhow = { workspace = true }
+camino = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+toml = { workspace = true }
+walkdir = { workspace = true }
+
+[lints]
+workspace = true

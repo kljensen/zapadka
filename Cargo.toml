@@ -1,0 +1,79 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/zapadka",
+    "crates/zapadka-core",
+    "crates/zapadka-parser",
+    "crates/zapadka-pg",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+repository = "https://github.com/kljensen/zapadka"
+
+[workspace.dependencies]
+zapadka-core = { path = "crates/zapadka-core", version = "0.1.0" }
+zapadka-parser = { path = "crates/zapadka-parser", version = "0.1.0" }
+zapadka-pg = { path = "crates/zapadka-pg", version = "0.1.0" }
+
+anyhow = "1.0.104"
+camino = "1.2.5"
+clap = { version = "4.6.6", features = ["derive", "wrap_help"] }
+insta = { version = "1.48.0", features = ["json", "redactions"] }
+schemars = { version = "1.2.2", features = ["uuid1"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+sha2 = "0.11.0"
+thiserror = "2.0.20"
+time = { version = "0.3.55", features = ["formatting", "parsing", "macros"] }
+tokio = { version = "1.53.1", features = ["rt", "macros", "time", "net"] }
+tokio-postgres = { version = "0.7.18", features = ["with-uuid-1"] }
+tokio-postgres-rustls = "0.14.0"
+toml = "0.9.8"
+uuid = { version = "1.24.0", features = ["v7", "serde"] }
+walkdir = "2.5.0"
+
+# Lint policy is set once for the whole workspace; each crate opts in with
+# `[lints] workspace = true`. See docs/development/code-quality.md.
+[workspace.lints.rust]
+# Public items are a contract. Undocumented ones are how a contract becomes
+# folklore.
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+# Zapadka has exactly one place that needs unsafe: the parser FFI boundary,
+# which opts back in explicitly. Anywhere else is a bug.
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Numeric conversions that can silently change a value are worth an explicit
+# decision every time: Zapadka reports durations, versions, and lock keys that
+# a truncation would quietly corrupt.
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+# Panicking in a migration tool means abandoning a run without a report.
+panic = "warn"
+todo = "deny"
+unimplemented = "deny"
+# Prose in this codebase deliberately names types without backticks where it
+# reads better; the lint fights that with no correctness benefit.
+doc_markdown = "allow"
+# Error conditions are described in prose on the function or module, not in a
+# mandatory `# Errors` heading on every one of hundreds of fallible functions.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# Crate names are already namespaces; `zapadka_core::error::Error` is correct.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+codegen-units = 1

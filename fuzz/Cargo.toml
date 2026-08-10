@@ -1,0 +1,40 @@
+[package]
+name = "zapadka-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Not a workspace member: fuzzing needs a nightly toolchain and links against
+# libFuzzer, neither of which should be a condition of an ordinary build.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+zapadka-core = { path = "../crates/zapadka-core" }
+
+[[bin]]
+name = "tap"
+path = "fuzz_targets/tap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manifest"
+path = "fuzz_targets/manifest.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = true

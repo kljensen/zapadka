@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A push that supersedes an in-flight run makes the older run's result
+# irrelevant, and Zapadka's integration jobs are not cheap.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail on a warning anywhere, including in a dependency's build script.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  quality:
+    name: Static analysis and code quality
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      # rust-toolchain.toml names the version; `rustup toolchain install` with
+      # no arguments reads it. Nothing here says "stable", so nothing here
+      # changes underneath a branch.
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install analysis tools
+        run: |
+          cargo install cargo-deny cargo-machete rust-code-analysis-cli --locked
+
+      # Runs the same battery as a developer's `cargo xtask quality`, so a green
+      # local run means a green pipeline.
+      - name: Run the quality battery
+        run: cargo xtask quality
+
+      - name: Check the published schema is current
+        run: cargo xtask schema --check
+
+  integration:
+    name: PostgreSQL 18 integration tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Docker is a hard requirement. The integration tests fail rather than
+      # skip when it is unavailable, so a broken runner cannot look like a pass.
+      - name: Confirm Docker is available
+        run: docker version
+
+      - name: Run integration tests
+        run: cargo test --workspace --locked -- --include-ignored
+        env:
+          ZAPADKA_REQUIRE_DOCKER: "1"
+
+  musl-binary:
+    name: Static musl binary
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      # `target add` resolves against the pinned toolchain, because it runs
+      # inside the checkout where rust-toolchain.toml applies.
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup target add x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install the musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl -p zapadka
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+
+      # ADR-0005 requires a binary with no dynamic database-client dependency.
+      # An ELF with no NEEDED entries is how that is proven rather than assumed.
+      - name: Prove the binary is static
+        run: |
+          binary=target/x86_64-unknown-linux-musl/release/zapadka
+          file "$binary"
+          if readelf -d "$binary" 2>/dev/null | grep -q NEEDED; then
+            echo "::error::the binary has dynamic dependencies:"
+            readelf -d "$binary" | grep NEEDED
+            exit 1
+          fi
+          echo "no dynamic NEEDED entries"
+
+      - name: Smoke test in a minimal container
+        run: |
+          docker network create zapadka-ci
+          docker run -d --name postgres --network zapadka-ci \
+            -e POSTGRES_PASSWORD=zapadka -e POSTGRES_DB=app \
+            postgres:18-alpine
+          for _ in $(seq 1 60); do
+            docker exec postgres pg_isready -q -U postgres && break
+            sleep 1
+          done
+          # A scratch-adjacent image with no shared libraries at all: if the
+          # binary needed one, it would fail here rather than in production.
+          docker run --rm --network zapadka-ci \
+            -v "$PWD/target/x86_64-unknown-linux-musl/release/zapadka:/zapadka:ro" \
+            -v "$PWD/.github/scripts:/scripts:ro" \
+            --entrypoint /zapadka busybox:1.37 --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zapadka-x86_64-unknown-linux-musl
+          path: target/x86_64-unknown-linux-musl/release/zapadka
+          if-no-files-found: error

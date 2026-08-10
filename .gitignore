@@ -4,3 +4,9 @@ tmp
 .agent-sync
 .claude
 .pi
+
+/target
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/.docker-cargo-registry

@@ -1,0 +1,16 @@
+# The toolchain is pinned rather than floating.
+#
+# CI used to install whatever `stable` meant that morning while developers ran
+# whatever they happened to have. A new clippy release then turned a green
+# branch red with lints nobody could reproduce locally -- and the only way to
+# see them was to read a CI log. Pinning makes a toolchain bump a commit,
+# reviewed like any other change, instead of something that happens to a branch
+# while nobody is looking.
+#
+# This version is also what the release image ships (rust:1.89-alpine, pinned by
+# digest in .github/scripts/build-musl.sh), so a released binary is built by the
+# same compiler that checked it. Bump both together.
+[toolchain]
+channel = "1.89.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
