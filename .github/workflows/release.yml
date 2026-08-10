@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build, for a dry run
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  binary:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            platform: linux/amd64
+          # aarch64 ships with v1; the job is here so both architectures are
+          # built the same way rather than by two divergent recipes.
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # Built inside a pinned Alpine image rather than on the runner. Alpine's
+      # Rust is musl-native, so the result is genuinely static rather than a
+      # glibc build cross-compiled and hoped about. Pinning by digest means a
+      # rebuild of the same tag produces the same binary.
+      - name: Build in a pinned musl container
+        run: |
+          docker run --rm --platform ${{ matrix.platform }} \
+            -v "$PWD:/src" -w /src \
+            rust@sha256:${{ env.RUST_ALPINE_DIGEST }} \
+            sh -euc '
+              apk add --no-cache musl-dev build-base >/dev/null
+              cargo build --release --locked --target ${{ matrix.target }} -p zapadka
+            '
+        env:
+          # rust:1.89-alpine
+          RUST_ALPINE_DIGEST: ${{ vars.RUST_ALPINE_DIGEST }}
+
+      # ADR-0005 requires a binary with no dynamic database-client dependency.
+      # An ELF with no NEEDED entries proves it rather than asserting it.
+      - name: Prove the binary is static
+        run: |
+          binary=target/${{ matrix.target }}/release/zapadka
+          file "$binary"
+          if readelf -d "$binary" 2>/dev/null | grep -q NEEDED; then
+            echo "::error::the binary has dynamic dependencies"
+            readelf -d "$binary" | grep NEEDED
+            exit 1
+          fi
+
+      - name: Smoke test against PostgreSQL 18
+        run: .github/scripts/smoke-test.sh target/${{ matrix.target }}/release/zapadka
+
+      - name: Checksum
+        run: |
+          cd target/${{ matrix.target }}/release
+          sha256sum zapadka > zapadka-${{ matrix.target }}.sha256
+          mv zapadka zapadka-${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zapadka-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}
+            target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish prerelease
+    needs: binary
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --prerelease \
+            --title "Zapadka ${GITHUB_REF_NAME}" \
+            --notes-file .github/release-notes-alpha.md \
+            artifacts/*/zapadka-*
