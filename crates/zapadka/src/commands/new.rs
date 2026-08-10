@@ -58,10 +58,13 @@ pub fn run(root: &Utf8Path, graph: &Graph, args: &NewArgs, session: &mut Session
 
     let mut manifest = Manifest::scaffold(id, &depends, reversibility);
     if let Some(reason) = &args.irreversible {
-        // Replace the placeholder with the reason the user actually gave.
+        // Serialized as TOML rather than pasted in with the quotes swapped. A
+        // reason containing a newline or a backslash would otherwise produce a
+        // manifest that `zapadka new` reports as created and the next `lint`
+        // rejects.
         manifest = manifest.replace(
-            "TODO: explain what makes this impossible to undo",
-            &reason.replace('"', "'"),
+            "\"TODO: explain what makes this impossible to undo\"",
+            &toml_string(reason),
         );
     }
 
@@ -105,9 +108,16 @@ fn resolve_explicit_dependencies(
     requested: &[String],
     session: &mut Session,
 ) -> Result<Vec<Uuid>> {
-    let mut resolved = Vec::with_capacity(requested.len());
+    let mut resolved: Vec<Uuid> = Vec::with_capacity(requested.len());
     for text in requested {
-        resolved.push(resolve_one(graph, text)?);
+        let id = resolve_one(graph, text)?;
+        // The same migration can be named twice -- once by slug and once by id.
+        // Keeping both would write a manifest with duplicate edges, which the
+        // next command rejects, leaving a project that has to be repaired by
+        // hand.
+        if !resolved.contains(&id) {
+            resolved.push(id);
+        }
     }
 
     // Depending on something that is not a head is legal but unusual: the new
@@ -176,6 +186,32 @@ fn resolve_one(graph: &Graph, text: &str) -> Result<Uuid> {
                 .join(", ")
         ))),
     }
+}
+
+/// Renders a value as a TOML basic string.
+///
+/// Small enough to do by hand, and doing it by hand keeps `new` from depending
+/// on a serializer for one field.
+fn toml_string(value: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn write(path: &Utf8Path, contents: &str) -> Result<()> {
@@ -351,6 +387,69 @@ mod tests {
             migration.manifest.irreversible_reason.as_deref(),
             Some("archived rows are deleted and not recoverable")
         );
+    }
+
+    #[test]
+    fn an_irreversible_reason_containing_awkward_characters_still_parses() {
+        // A reason with a newline or a quote used to produce a manifest that
+        // `new` reported as created and the next command rejected.
+        for reason in [
+            "line one\nline two",
+            "contains \"quotes\" and a \\ backslash",
+            "a tab\there",
+        ] {
+            let project = temp_project();
+            let (_, graph) = load_project(project.path()).unwrap();
+            let mut session = Session::new("new");
+            run(
+                project.path(),
+                &graph,
+                &NewArgs {
+                    slug: "drop-legacy".to_owned(),
+                    depends: Vec::new(),
+                    irreversible: Some(reason.to_owned()),
+                },
+                &mut session,
+            )
+            .unwrap();
+
+            // The written package must load, which is what proves the manifest
+            // is well formed rather than merely written.
+            let (_, graph) = load_project(project.path()).unwrap_or_else(|error| {
+                panic!("{reason:?} produced an unloadable project: {error}")
+            });
+            let migration = graph.migrations().next().unwrap();
+            assert_eq!(
+                migration.manifest.irreversible_reason.as_deref(),
+                Some(reason)
+            );
+        }
+    }
+
+    #[test]
+    fn naming_the_same_dependency_twice_does_not_write_a_broken_manifest() {
+        // Once by slug and once by id resolves to the same migration; keeping
+        // both would write duplicate edges that the next command rejects.
+        let project = temp_project();
+        let base = new_migration(project.path(), "base", &[]).unwrap();
+
+        let (_, graph) = load_project(project.path()).unwrap();
+        let mut session = Session::new("new");
+        run(
+            project.path(),
+            &graph,
+            &NewArgs {
+                slug: "next".to_owned(),
+                depends: vec!["base".to_owned(), base.to_string()],
+                irreversible: None,
+            },
+            &mut session,
+        )
+        .unwrap();
+
+        let (_, graph) = load_project(project.path()).expect("the project must still load");
+        let created = graph.migrations().find(|m| m.slug == "next").unwrap();
+        assert_eq!(created.depends(), [base]);
     }
 
     #[test]

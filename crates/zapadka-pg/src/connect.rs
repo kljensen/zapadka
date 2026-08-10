@@ -161,6 +161,21 @@ fn from_service(settings: &service::ServiceSettings, name: &str) -> Result<PgCon
             "host" => {
                 config.host(value);
             }
+            // In libpq, `hostaddr` is the address to connect to while `host`
+            // remains the name used for TLS verification. tokio-postgres has no
+            // way to express that pairing -- passing both would add two
+            // failover hosts, so Zapadka could connect to one while verifying
+            // the other. Refusing is the only honest option.
+            "hostaddr" if settings.contains_key("host") => {
+                return Err(Error::new(
+                    ErrorCode::TargetInvalid,
+                    format!("service {name:?} sets both host and hostaddr"),
+                )
+                .with_hint(
+                    "Zapadka cannot express libpq's pairing of hostaddr for the connection with \
+                     host for certificate verification; set one or the other",
+                ));
+            }
             "hostaddr" => {
                 config.host(value);
             }
@@ -423,6 +438,22 @@ mod tests {
         let error = ssl_mode("verify_full", "s").unwrap_err();
         assert_eq!(error.code, ErrorCode::TargetInvalid);
         assert!(error.hint().unwrap().contains("verify-full"));
+    }
+
+    #[test]
+    fn host_and_hostaddr_together_are_refused_rather_than_guessed_at() {
+        // libpq connects to hostaddr and verifies the certificate against host.
+        // Silently treating them as two failover hosts could connect to one and
+        // verify the other.
+        let mut settings = service::ServiceSettings::new();
+        settings.insert("host".to_owned(), "db.internal".to_owned());
+        settings.insert("hostaddr".to_owned(), "10.0.0.5".to_owned());
+        let error = from_service(&settings, "s").unwrap_err();
+        assert_eq!(error.code, ErrorCode::TargetInvalid);
+
+        // Either alone is fine.
+        settings.remove("host");
+        assert!(from_service(&settings, "s").is_ok());
     }
 
     #[test]

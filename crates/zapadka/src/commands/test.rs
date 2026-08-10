@@ -15,6 +15,15 @@
 //! underneath it, and nobody would know which schema the suite actually ran
 //! against. Preparing the target is a separate, visible step — usually
 //! `zapadka deploy --target test` in the line above this one in a CI script.
+//!
+//! # Why the whole suite holds the deployment lock
+//!
+//! A suite is not read-only: it installs pgTAP, and it restores sequence
+//! positions after each file. Two suites overlapping on one target would race
+//! on both — and each one's sequence restoration would undo the other's. A
+//! suite overlapping a deploy would run against a schema changing underneath
+//! it. So the lock is held from before the pgTAP install until after the last
+//! file, and every per-file connection runs inside it.
 
 use zapadka_core::config::LoadedConfig;
 use zapadka_core::error::{Error, ErrorCode, Result};
@@ -22,7 +31,7 @@ use zapadka_core::graph::Graph;
 use zapadka_core::report::{Assertion, AssertionStatus, Status, TestFile as TestFileReport};
 use zapadka_core::tap::{Outcome, Plan};
 use zapadka_core::testsuite;
-use zapadka_pg::{history, pgtap, testrun};
+use zapadka_pg::{history, lock, pgtap, testrun};
 
 use crate::cli::TestArgs;
 use crate::commands::target;
@@ -81,24 +90,60 @@ pub async fn run(
         ));
     }
 
+    let (name, server_version) = (opened.name.clone(), opened.facts.server_version.clone());
     let mut client = opened.connection.client;
-    ensure_pgtap(&mut client, &opened.facts.server_version, session).await?;
-    // The install connection is finished with; every file gets its own.
-    drop(client);
+
+    // Taken before the pgTAP install and held until the last file has run.
+    let held = lock::acquire(
+        &client,
+        config.config.project.id,
+        config.config.policy.advisory_lock_timeout,
+    )
+    .await?;
+
+    let outcome = run_suite(
+        config,
+        args,
+        session,
+        &mut client,
+        &name,
+        &server_version,
+        &selected,
+        &application_schemas,
+    )
+    .await;
+
+    let released = held.release(&client).await;
+    outcome.and(released)
+}
+
+/// Runs every selected file, with the deployment lock held.
+#[allow(clippy::too_many_arguments)]
+async fn run_suite(
+    config: &LoadedConfig,
+    args: &TestArgs,
+    session: &mut Session,
+    client: &mut zapadka_pg::Client,
+    name: &str,
+    server_version: &str,
+    selected: &[testsuite::TestFile],
+    application_schemas: &[String],
+) -> Result<()> {
+    ensure_pgtap(client, server_version, session).await?;
 
     let mut failures = 0usize;
-    for file in &selected {
+    for file in selected {
         // A fresh connection per file, so no session state can leak between
-        // them: a temporary table, a `SET`, a prepared statement, a sequence
-        // value. A suite whose result depends on file order is not a suite.
+        // them: a temporary table, a `SET`, a prepared statement. A suite whose
+        // result depends on file order is not a suite.
         let resolved = zapadka_pg::resolve(
-            &opened.name,
-            config.config.targets.get(&opened.name),
+            name,
+            config.config.targets.get(name),
             args.target.uri.as_deref(),
         )?;
         let mut connection = zapadka_pg::connect(&resolved).await?;
 
-        let outcome = testrun::run_file(&mut connection.client, file, &application_schemas).await;
+        let outcome = testrun::run_file(&mut connection.client, file, application_schemas).await;
         if !outcome.passed() {
             failures += 1;
         }
