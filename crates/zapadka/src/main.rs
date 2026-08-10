@@ -81,6 +81,10 @@ fn dispatch(cli: &Cli, session: &mut Session) -> Result<()> {
             let (config, graph) = commands::load_project(&directory)?;
             block_on(commands::baseline::run(&config, &graph, args, session))
         }
+        Command::Test(args) => {
+            let (config, graph) = commands::load_project(&directory)?;
+            block_on(commands::test::run(&config, &graph, args, session))
+        }
     }
 }
 

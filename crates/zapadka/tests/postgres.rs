@@ -763,3 +763,180 @@ fn a_baselined_project_deploys_only_what_follows_it() {
     assert_eq!(report.slugs_with_status("succeeded"), ["next"]);
     assert!(db.has_relation("public.genuinely_new"));
 }
+
+#[test]
+fn runs_database_tests_against_a_prepared_target() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE SCHEMA app; CREATE TABLE app.orders (id bigint PRIMARY KEY, total numeric NOT NULL);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    project.test_file(
+        "orders.sql",
+        "SELECT plan(2);
+         SELECT has_table('app', 'orders', 'the orders table exists');
+         SELECT col_is_pk('app', 'orders', 'id', 'id is the primary key');
+         SELECT finish();",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_success();
+
+    let tests = report.json["tests"].as_array().expect("tests are reported");
+    assert_eq!(tests.len(), 1);
+    assert_eq!(tests[0]["path"], "tests/db/orders.sql");
+    assert_eq!(tests[0]["status"], "succeeded");
+    assert_eq!(tests[0]["planned"], 2);
+    assert_eq!(tests[0]["assertions"].as_array().unwrap().len(), 2);
+    assert_eq!(tests[0]["assertions"][0]["status"], "passed");
+
+    // pgTAP went into its own schema, not into the application's and not as an
+    // extension.
+    assert_eq!(
+        db.scalar("SELECT count(*) FROM pg_extension WHERE extname = 'pgtap'"),
+        "0"
+    );
+    assert_eq!(db.scalar("SELECT zapadka_test.pgtap_version()"), "1.3");
+}
+
+#[test]
+fn a_failing_assertion_fails_the_run_and_reports_its_diagnostics() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    project.test_file(
+        "orders.sql",
+        "SELECT plan(2);
+         SELECT has_table('public', 'orders', 'the orders table exists');
+         SELECT is(1, 2, 'one equals two');
+         SELECT finish();",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_failed("verify.failed", exit::EXECUTION);
+
+    let tests = &report.json["tests"];
+    assert_eq!(tests[0]["status"], "failed");
+    assert_eq!(tests[0]["assertions"][0]["status"], "passed");
+    assert_eq!(tests[0]["assertions"][1]["status"], "failed");
+    // pgTAP's YAML diagnostics survive into the report.
+    assert_eq!(tests[0]["assertions"][1]["diagnostics"]["have"], "1");
+    assert_eq!(tests[0]["assertions"][1]["diagnostics"]["want"], "2");
+}
+
+#[test]
+fn a_test_file_cannot_leave_anything_behind() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // The first file writes; the second asserts the write is not visible. Both
+    // run in the same suite, in order.
+    project.test_file(
+        "a-writes.sql",
+        "SELECT plan(1);
+         INSERT INTO public.orders VALUES (1);
+         SELECT ok(true, 'inserted a row');
+         SELECT finish();",
+    );
+    project.test_file(
+        "b-cannot-see-it.sql",
+        "SELECT plan(1);
+         SELECT is((SELECT count(*)::int FROM public.orders), 0, 'the other file left nothing');
+         SELECT finish();",
+    );
+
+    project
+        .report(&["test", "--uri", &db.uri()])
+        .assert_success();
+    assert_eq!(db.scalar("SELECT count(*) FROM public.orders"), "0");
+}
+
+#[test]
+fn a_test_file_with_no_plan_is_a_failure_not_a_pass() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // Emits a passing assertion and then stops. Without the plan check this
+    // would look like a pass, which is the failure mode that matters most.
+    project.test_file("orders.sql", "SELECT ok(true, 'looks fine');");
+
+    // pgTAP itself refuses to run an assertion before a plan, so the failure
+    // arrives as a SQL error rather than as unparseable TAP. Either way the run
+    // fails, which is the property that matters.
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_failed("verify.failed", exit::EXECUTION);
+    let message = report.json["tests"][0]["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_lowercase();
+    assert!(message.contains("plan"), "{message}");
+}
+
+#[test]
+fn test_refuses_to_guess_which_database_to_use() {
+    let project = project();
+    project.test_file("orders.sql", "SELECT plan(0); SELECT finish();");
+
+    // No --target and no --uri. This command installs a framework and runs
+    // arbitrary SQL, so it never picks a database on its own.
+    let report = project.report(&["test"]);
+    report.assert_failed("target.unknown", 3);
+}
+
+#[test]
+fn test_refuses_a_target_whose_migrations_are_not_applied() {
+    let db = database();
+    let project = project();
+    let first = project.migration("first", &[], "CREATE TABLE public.a (i int);");
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+    // Added after the deploy, so the target no longer matches the project.
+    project.migration("second", &[first], "CREATE TABLE public.b (i int);");
+    project.test_file("orders.sql", "SELECT plan(0); SELECT finish();");
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_failed("registry.not_initialized", exit::REGISTRY);
+    assert_eq!(report.error_context("pending"), "1");
+}
+
+#[test]
+fn a_selector_matching_no_test_file_is_an_error() {
+    let db = database();
+    let project = project();
+    project.test_file("orders.sql", "SELECT plan(0); SELECT finish();");
+
+    project
+        .report(&["test", "--uri", &db.uri(), "does-not-exist.sql"])
+        .assert_failed("selector.matched_nothing", 3);
+}

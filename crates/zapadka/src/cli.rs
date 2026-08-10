@@ -62,6 +62,9 @@ pub enum Command {
 
     /// Record migrations as applied without running them.
     Baseline(BaselineArgs),
+
+    /// Run database tests against a prepared test target.
+    Test(TestArgs),
 }
 
 impl Command {
@@ -76,6 +79,7 @@ impl Command {
             Self::Verify(_) => "verify",
             Self::Revert(_) => "revert",
             Self::Baseline(_) => "baseline",
+            Self::Test(_) => "test",
         }
     }
 }
@@ -208,6 +212,19 @@ pub struct BaselineArgs {
     /// How long to wait for the deployment lock.
     #[arg(long, value_name = "DURATION", value_parser = parse_timeout)]
     pub wait: Option<Timeout>,
+}
+
+#[derive(Debug, Args)]
+pub struct TestArgs {
+    #[command(flatten)]
+    pub target: TargetArgs,
+
+    /// Test files, directories, or globs to run. Defaults to every test file.
+    ///
+    /// Selectors form a union and may be written relative to the project root
+    /// or to `tests/db`. A selector that matches nothing is an error.
+    #[arg(value_name = "PATH")]
+    pub files: Vec<String>,
 }
 
 /// Parses a `--wait` value, reporting the accepted spellings on failure.

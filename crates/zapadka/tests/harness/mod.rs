@@ -322,6 +322,15 @@ impl Project {
         id
     }
 
+    /// Writes a database test file under `tests/db`.
+    pub fn test_file(&self, relative_path: &str, sql: &str) {
+        let path = self.root.join("tests/db").join(relative_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("cannot create a test directory");
+        }
+        std::fs::write(path, sql).expect("cannot write a test file");
+    }
+
     /// Rewrites a migration's `deploy.sql`, as an ill-advised edit would.
     pub fn rewrite_deploy(&self, id: Uuid, sql: &str) {
         let dir = self.migration_dir(id);

@@ -12,6 +12,7 @@ pub mod new;
 pub mod revert;
 pub mod status;
 pub mod target;
+pub mod test;
 pub mod verify;
 
 use camino::Utf8Path;

@@ -13,8 +13,10 @@ pub mod error;
 pub mod execute;
 pub mod history;
 pub mod lock;
+pub mod pgtap;
 pub mod registry;
 pub mod service;
+pub mod testrun;
 
 pub use connect::{Connection, Source, connect, resolve};
 pub use execute::{Runner, ScriptOutcome, Timeouts};

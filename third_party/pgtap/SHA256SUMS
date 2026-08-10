@@ -1,0 +1,4 @@
+dc0bce1dd2422adc5e08780a58bd3ede22c215b039a3b664d3df91f5656bf83d  META.json
+dc788fc39d4fb5cda4ea63d6168bcc6077bf3c15fe8a08a1e0e2fd66bffaf780  README.md
+b073089908333a1522c925ca9968cebb04d9fa0b1f99e932bda635ffaecdca55  pgtap.control
+383ecd73edfd1c7ed5f3b835134ee1fe74e201ee31599346c92ea029b65dcdce  sql/pgtap.sql.in
