@@ -156,11 +156,11 @@ fn write_migration(
     let mark = mark(migration.status);
     let id = &migration.id.to_string()[..8];
     let verb = match (migration.action, migration.status) {
-        // Before the skipped arm: a resolution that recorded "not applied" is
-        // not a migration the run skipped over, and calling it that would read
-        // as though nothing had been decided.
-        (Action::Resolve, Status::Succeeded) => "recorded as applied",
-        (Action::Resolve, _) => "recorded as not applied",
+        // Before the skipped arm, because a resolution is never a migration the
+        // run skipped over. Which way it was resolved is in the diagnostic
+        // beside this line, not in the status: both directions are a
+        // resolution that succeeded.
+        (Action::Resolve, _) => "resolved",
         // A run that stopped early still lists what it did not get to, so the
         // report accounts for every migration it selected.
         (_, Status::Skipped) => "skipped",

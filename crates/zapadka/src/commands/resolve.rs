@@ -132,17 +132,12 @@ async fn resolve_under_lock(
 
     let outcome = runner.resolve(&attempt, args.applied).await;
     if outcome.is_ok() {
-        session.migrations.push(MigrationResult {
-            status: if args.applied {
-                Status::Succeeded
-            } else {
-                // Nothing was applied and nothing was undone. The migration is
-                // pending again, which is what `Skipped` means everywhere else
-                // in a report: selected, not applied.
-                Status::Skipped
-            },
-            ..result_of(&attempt)
-        });
+        // Succeeded in both directions: the status describes the *resolution*,
+        // which happened, not the state it recorded. `--not-applied` mutates
+        // the registry just as much as `--applied` does, and reporting it as
+        // skipped would tell automation that nothing was done. Which way it
+        // was resolved is carried by the diagnostic below and by the event.
+        session.migrations.push(result_of(&attempt));
         session.diagnose(zapadka_core::report::Diagnostic {
             severity: zapadka_core::report::Severity::Warning,
             code: "resolve.asserted_by_operator".to_owned(),
