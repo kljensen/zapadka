@@ -1517,3 +1517,35 @@ fn an_empty_verification_script_is_refused_rather_than_reported_as_verified() {
         "0"
     );
 }
+
+#[test]
+fn standalone_verify_refuses_a_script_that_became_empty() {
+    // `verify.sql` is mutable and standalone `verify` never runs lint, so the
+    // check has to live at the execution boundary. Running a no-op would record
+    // a successful verification for a check that did not happen.
+    let db = database();
+    let project = project();
+    let id = project.migration_with(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint PRIMARY KEY);",
+        None,
+        Some("SELECT 1 FROM public.orders;"),
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    project.rewrite_script(id, "verify.sql", "-- the check was removed\n");
+
+    let report = project.report(&["verify", "--uri", &db.uri()]);
+    report.assert_failed("script.empty", exit::VALIDATION);
+    assert_eq!(
+        db.scalar(
+            "SELECT count(*) FROM zapadka.events \
+             WHERE action = 'verify' AND outcome = 'succeeded'"
+        ),
+        "1",
+        "only the original deploy-time verification should be recorded"
+    );
+}

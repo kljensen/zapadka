@@ -89,10 +89,7 @@ impl Script {
     /// the difference, so a script that does not parse is not called empty —
     /// it has a different, louder problem.
     pub fn runs_nothing(&self) -> bool {
-        if self.sql.trim().is_empty() {
-            return true;
-        }
-        zapadka_parser::parse(&self.sql).is_ok_and(|parsed| parsed.statements.is_empty())
+        crate::lint::runs_nothing(&self.sql)
     }
 }
 

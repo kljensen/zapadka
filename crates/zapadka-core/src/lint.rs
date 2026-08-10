@@ -112,6 +112,18 @@ impl Findings {
     }
 }
 
+/// Whether a script would execute no statements.
+///
+/// A file of nothing but comments is as much a no-op as an empty one, and far
+/// more likely to be mistaken for real work. Shared with the runner so that
+/// lint and execution agree on what "empty" means.
+pub fn runs_nothing(sql: &str) -> bool {
+    if sql.trim().is_empty() {
+        return true;
+    }
+    zapadka_parser::parse(sql).is_ok_and(|parsed| parsed.statements.is_empty())
+}
+
 /// Rejects a script that would take the transaction boundary away from the
 /// runner.
 ///

@@ -290,6 +290,24 @@ impl Runner {
         // rollback.
         zapadka_core::lint::ensure_runner_owns_transaction(sql, path)?;
 
+        // And that it actually checks something. `verify.sql` is mutable, so it
+        // can become empty after the migration that owns it was reviewed --
+        // and standalone `verify` never runs lint. Executing a no-op would
+        // record a successful verification for a check that did not happen,
+        // which is the one failure a verification mechanism must not have.
+        if zapadka_core::lint::runs_nothing(sql) {
+            return Err(Error::new(
+                zapadka_core::error::ErrorCode::ScriptEmpty,
+                format!("{path} runs no statements"),
+            )
+            .at(zapadka_core::report::Location::file(path))
+            .with_hint(
+                "a verification script that does nothing would be recorded as a successful \
+                 verification; write the check, or delete the file to make this migration \
+                 unverified",
+            ));
+        }
+
         let transaction = self
             .client
             .transaction()
