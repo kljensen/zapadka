@@ -128,7 +128,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish prerelease
+    name: Publish the release
     needs: binary
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
@@ -138,12 +138,19 @@ jobs:
         with:
           path: artifacts
 
+      # A semver prerelease carries a hyphen (v0.2.0-rc.1); a final release
+      # does not. Deriving the flag from the tag keeps a hand-edited workflow
+      # from publishing a release marked as the wrong kind.
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          case "${GITHUB_REF_NAME}" in
+            *-*) prerelease=--prerelease ;;
+            *)   prerelease= ;;
+          esac
           gh release create "${GITHUB_REF_NAME}" \
-            --prerelease \
+            ${prerelease} \
             --title "Zapadka ${GITHUB_REF_NAME}" \
-            --notes-file .github/release-notes-alpha.md \
+            --notes-file .github/release-notes.md \
             artifacts/*/zapadka-*

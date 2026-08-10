@@ -197,9 +197,6 @@ the audited recovery path for an interrupted run, because a nontransactional
 statement that was cut off mid-flight leaves a state Zapadka cannot infer.
 Shipping the mode without that recovery would be worse than not shipping it.
 
-**No release has been published yet.** Binaries are built and tested for both
-architectures on every change, but no tag has been cut.
-
 Deliberately out of scope for v1: Sqitch or pgTAP CLI/metadata compatibility,
 non-PostgreSQL databases, automatic rollback, declarative schema diffing,
 repeatable migrations, callbacks, and multi-project registries.
