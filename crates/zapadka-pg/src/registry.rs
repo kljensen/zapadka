@@ -546,16 +546,11 @@ pub async fn read(client: &Client, schema: &str) -> Result<RegistryState> {
         });
     }
 
-    let applied = read_applied(client, &quoted).await?;
-
-    // Format 1 registries predate the table. They cannot hold an unresolved
-    // attempt either, because the binaries that wrote them refused to run a
-    // nontransactional migration at all.
-    let unresolved = if format_version.is_some_and(|version| version >= 2) {
-        read_unresolved(client, &quoted).await?
-    } else {
-        BTreeMap::new()
-    };
+    // Format 1 registries predate the attempts table. They cannot hold an
+    // unresolved attempt either, because the binaries that wrote them refused
+    // to run a nontransactional migration at all.
+    let has_attempts = format_version.is_some_and(|version| version >= 2);
+    let (applied, unresolved) = read_state(client, &quoted, has_attempts).await?;
 
     Ok(RegistryState {
         format_version,
@@ -565,68 +560,85 @@ pub async fn read(client: &Client, schema: &str) -> Result<RegistryState> {
     })
 }
 
-/// Reads the applied-migration rows.
-async fn read_applied(client: &Client, quoted: &str) -> Result<BTreeMap<Uuid, AppliedMigration>> {
-    let rows = client
-        .query(
-            &format!(
-                "SELECT migration_id, slug, definition_sha256, deploy_sha256, depends, \
-                        transaction_mode, applied_at::text \
-                 FROM {quoted}.applied_migrations ORDER BY migration_id"
-            ),
-            &[],
-        )
-        .await
-        .map_err(|error| registry_failed(error, "read applied migrations"))?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| {
-            let migration = AppliedMigration {
-                id: row.get(0),
-                slug: row.get(1),
-                definition_sha256: row.get(2),
-                deploy_sha256: row.get(3),
-                depends: row.get(4),
-                transaction_mode: row.get(5),
-                applied_at: row.get(6),
-            };
-            (migration.id, migration)
-        })
-        .collect())
-}
-
-/// Reads the nontransactional attempts nobody has resolved.
-async fn read_unresolved(
+/// Reads applied migrations and unresolved attempts together.
+///
+/// Deliberately one statement. The two tables describe one state between them,
+/// and a migration moves from the second to the first in a single transaction
+/// -- a successful nontransactional deploy, or `resolve --applied`. Read as two
+/// statements, a commit landing in between would be seen by neither: the
+/// applied row not yet there, the attempt row already gone. `status` takes no
+/// lock by design, so it would report the migration as plain pending, which is
+/// a state that never existed.
+///
+/// Under read committed a single statement sees a single snapshot, so the union
+/// cannot straddle that commit.
+async fn read_state(
     client: &Client,
     quoted: &str,
-) -> Result<BTreeMap<Uuid, UnresolvedAttempt>> {
+    has_attempts: bool,
+) -> Result<(
+    BTreeMap<Uuid, AppliedMigration>,
+    BTreeMap<Uuid, UnresolvedAttempt>,
+)> {
+    let attempts = if has_attempts {
+        format!(
+            " UNION ALL \
+             SELECT 'attempt', migration_id, slug, definition_sha256, deploy_sha256, depends, \
+                    'forbidden', started_at::text, run_id, session_user_name \
+             FROM {quoted}.nontransactional_attempts"
+        )
+    } else {
+        String::new()
+    };
+
     let rows = client
         .query(
             &format!(
-                "SELECT migration_id, slug, definition_sha256, deploy_sha256, depends,                         started_at::text, run_id, session_user_name                  FROM {quoted}.nontransactional_attempts ORDER BY started_at"
+                "SELECT 'applied' AS kind, migration_id, slug, definition_sha256, deploy_sha256, \
+                        depends, transaction_mode, applied_at::text, NULL::uuid, NULL::text \
+                 FROM {quoted}.applied_migrations{attempts} \
+                 ORDER BY 1, 2"
             ),
             &[],
         )
         .await
-        .map_err(|error| registry_failed(error, "read unresolved nontransactional attempts"))?;
+        .map_err(|error| registry_failed(error, "read the registry state"))?;
 
-    Ok(rows
-        .into_iter()
-        .map(|row| {
-            let attempt = UnresolvedAttempt {
-                id: row.get(0),
-                slug: row.get(1),
-                definition_sha256: row.get(2),
-                deploy_sha256: row.get(3),
-                depends: row.get(4),
-                started_at: row.get(5),
-                run_id: row.get(6),
-                session_user_name: row.get(7),
-            };
-            (attempt.id, attempt)
-        })
-        .collect())
+    let mut applied = BTreeMap::new();
+    let mut unresolved = BTreeMap::new();
+    for row in rows {
+        let kind: &str = row.get(0);
+        let id: Uuid = row.get(1);
+        if kind == "applied" {
+            applied.insert(
+                id,
+                AppliedMigration {
+                    id,
+                    slug: row.get(2),
+                    definition_sha256: row.get(3),
+                    deploy_sha256: row.get(4),
+                    depends: row.get(5),
+                    transaction_mode: row.get(6),
+                    applied_at: row.get(7),
+                },
+            );
+        } else {
+            unresolved.insert(
+                id,
+                UnresolvedAttempt {
+                    id,
+                    slug: row.get(2),
+                    definition_sha256: row.get(3),
+                    deploy_sha256: row.get(4),
+                    depends: row.get(5),
+                    started_at: row.get(7),
+                    run_id: row.get(8),
+                    session_user_name: row.get(9),
+                },
+            );
+        }
+    }
+    Ok((applied, unresolved))
 }
 
 /// Creates or upgrades the registry to the version this binary writes.

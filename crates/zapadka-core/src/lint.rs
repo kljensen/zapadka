@@ -380,6 +380,39 @@ fn check_execution_mode(
                     ),
                 );
             }
+
+            // And that statement must be one PostgreSQL actually refuses inside
+            // a transaction.
+            //
+            // Partly because giving up atomicity for a statement that did not
+            // need it is a bad trade with nothing on the other side. Mostly
+            // because the recovery path depends on it: an error from the server
+            // is treated as proof the migration did not take effect, which
+            // holds for these statements and does not hold in general. A
+            // procedure called here could `COMMIT` some work and *then* raise,
+            // and the error would look identical while the work was durable --
+            // so the next deploy would run it again.
+            if let [statement] = parsed.statements.as_slice()
+                && statement.kind.forbidden_in_transaction().is_none()
+            {
+                findings.errors.push(
+                    Error::new(
+                        ErrorCode::ExecutionModeUnsupported,
+                        format!(
+                            "{} declares transaction = \"forbidden\" but its statement runs \
+                             perfectly well inside a transaction",
+                            migration.relative_dir
+                        ),
+                    )
+                    .at(Location::file(&script.relative_path))
+                    .with_hint(
+                        "this mode is for statements PostgreSQL refuses in a transaction block -- \
+                         CREATE INDEX CONCURRENTLY and its relatives. Everything else should use \
+                         transaction = \"required\", which is atomic and needs no recovery ritual \
+                         when a deploy is interrupted.",
+                    ),
+                );
+            }
         }
     }
 }

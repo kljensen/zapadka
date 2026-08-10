@@ -1868,6 +1868,18 @@ fn resolve_refuses_without_being_told_what_happened() {
 }
 
 #[test]
+fn a_nontransactional_migration_whose_statement_needs_no_such_mode_is_rejected() {
+    let project = project();
+    // A `CALL` is the case that matters: a procedure can COMMIT some work and
+    // then raise, so the server error the runner treats as "nothing happened"
+    // would be a lie, and a retry would duplicate the committed part.
+    project.nontransactional_migration("call-a-procedure", &[], "CALL do_the_thing();");
+
+    let report = project.report(&["lint"]);
+    report.assert_failed("execution.mode_unsupported", 4);
+}
+
+#[test]
 fn a_nontransactional_migration_with_two_statements_is_rejected_before_connecting() {
     let project = project();
     project.nontransactional_migration(
