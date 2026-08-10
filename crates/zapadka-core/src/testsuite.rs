@@ -162,8 +162,7 @@ fn glob_matches(path: &str, pattern: &str) -> bool {
     globset::GlobBuilder::new(pattern)
         .literal_separator(true)
         .build()
-        .map(|glob| glob.compile_matcher().is_match(path))
-        .unwrap_or(false)
+        .is_ok_and(|glob| glob.compile_matcher().is_match(path))
 }
 
 #[cfg(test)]

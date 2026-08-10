@@ -37,6 +37,19 @@ cargo install cargo-deny cargo-machete rust-code-analysis-cli --locked
 partial local setup still gives useful output. CI installs all of them, so
 nothing is skipped where it counts.
 
+## The toolchain is pinned
+
+`rust-toolchain.toml` names the exact compiler, and rustup selects it for
+anyone working in this checkout. That is deliberate: clippy gains lints between
+releases, so a floating `stable` means CI eventually fails on warnings a
+developer cannot reproduce locally — and the only way to read them is a CI log.
+
+The pin is the same version the release image ships, so the compiler that
+checks the code is the compiler that builds the binary. Bumping it is a commit
+that updates `rust-toolchain.toml`, `rust-version` in the root `Cargo.toml`, and
+the image digests in `.github/scripts/build-musl.sh` together, with any new
+lints fixed in the same change.
+
 ## Lint policy
 
 Lints are configured once, in `[workspace.lints]` in the root `Cargo.toml`.

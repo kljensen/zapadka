@@ -92,11 +92,11 @@ impl fmt::Display for Timeout {
         let ms = self.milliseconds;
         if ms == 0 {
             f.write_str("0")
-        } else if ms % 3_600_000 == 0 {
+        } else if ms.is_multiple_of(3_600_000) {
             write!(f, "{}h", ms / 3_600_000)
-        } else if ms % 60_000 == 0 {
+        } else if ms.is_multiple_of(60_000) {
             write!(f, "{}min", ms / 60_000)
-        } else if ms % 1_000 == 0 {
+        } else if ms.is_multiple_of(1_000) {
             write!(f, "{}s", ms / 1_000)
         } else {
             write!(f, "{ms}ms")

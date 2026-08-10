@@ -23,10 +23,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # rust-toolchain.toml names the version; `rustup toolchain install` with
+      # no arguments reads it. Nothing here says "stable", so nothing here
+      # changes underneath a branch.
       - name: Install the pinned toolchain
-        run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy
-          rustup default stable
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
@@ -49,9 +50,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Install the pinned toolchain
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
@@ -71,11 +70,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # `target add` resolves against the pinned toolchain, because it runs
+      # inside the checkout where rust-toolchain.toml applies.
       - name: Install the pinned toolchain
         run: |
-          rustup toolchain install stable --profile minimal
+          rustup toolchain install
           rustup target add x86_64-unknown-linux-musl
-          rustup default stable
 
       - uses: Swatinem/rust-cache@v2
 
