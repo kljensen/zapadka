@@ -454,3 +454,17 @@ CREATE OR REPLACE FUNCTION col_is_pk(name, name[]) RETURNS boolean AS $$
         'table ' || quote_ident($1) || ' should have primary key ('
         || array_to_string($2, ', ') || ')');
 $$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION hasnt_sequence(name, name, text) RETURNS boolean AS $$
+    SELECT _record(
+        'hasnt_sequence',
+        NOT _relation_exists('{S}'::"char"[], $1, $2),
+        $3,
+        jsonb_build_object('schema', $1, 'sequence', $2)
+    );
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION hasnt_sequence(name, name) RETURNS boolean AS $$
+    SELECT hasnt_sequence($1, $2,
+        'sequence ' || quote_ident($1) || '.' || quote_ident($2) || ' should not exist');
+$$ LANGUAGE sql;

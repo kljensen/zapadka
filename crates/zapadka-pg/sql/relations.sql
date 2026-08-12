@@ -395,7 +395,7 @@ BEGIN
               WHERE h.__position IS NULL OR w.__position IS NULL OR (%s)',
             coalesce(predicate, 'false')
         ) INTO first_bad;
-    EXCEPTION WHEN undefined_column OR datatype_mismatch THEN
+    EXCEPTION WHEN undefined_column OR datatype_mismatch OR undefined_function THEN
         RETURN _record('results_eq', false, $3, jsonb_build_object(
             'kind', 'ordered',
             'problem', 'the two queries do not have comparable columns',

@@ -283,3 +283,9 @@ CREATE OR REPLACE FUNCTION performs_within(text, numeric, numeric, integer)
 RETURNS boolean AS $$
     SELECT performs_within($1, $2, $3, $4, NULL::text);
 $$ LANGUAGE sql;
+
+-- The no-description form, which is what most pgTAP files actually call.
+CREATE OR REPLACE FUNCTION performs_within(text, numeric, numeric)
+RETURNS boolean AS $$
+    SELECT performs_within($1, $2, $3, 10, NULL::text);
+$$ LANGUAGE sql;

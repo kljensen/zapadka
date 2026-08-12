@@ -114,19 +114,48 @@ pub async fn installed(client: &Client) -> Result<Installation> {
     let quoted = quote_identifier(TEST_SCHEMA);
 
     // A target tested by an earlier Zapadka carries `zapadka_pgtap` instead.
-    // Without this it would look like a schema Zapadka did not create, and the
-    // operator would be told to rename or drop a schema Zapadka had put there
-    // itself -- an upgrade that blocks on a lie.
+    // Without recognising it, the schema would look like one Zapadka did not
+    // create and the operator would be told to drop something Zapadka had put
+    // there itself.
+    //
+    // The shape is checked, not just the name. Classifying as legacy leads to
+    // `DROP SCHEMA ... CASCADE`, so a bare name match would let any unrelated
+    // schema that happened to contain a `zapadka_pgtap` relation be destroyed.
+    // A table with these four columns and a singleton row is Zapadka's;
+    // anything else is somebody's data.
     let legacy: bool = client
         .query_one(
-            "SELECT EXISTS (SELECT 1 FROM pg_class c \
-               JOIN pg_namespace n ON n.oid = c.relnamespace \
-              WHERE n.nspname = $1 AND c.relname = 'zapadka_pgtap')",
+            "SELECT EXISTS ( \
+               SELECT 1 FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                WHERE n.nspname = $1 \
+                  AND c.relname = 'zapadka_pgtap' \
+                  AND c.relkind = 'r' \
+                  AND (SELECT count(*) FROM pg_attribute a \
+                        WHERE a.attrelid = c.oid AND a.attnum > 0 \
+                          AND NOT a.attisdropped \
+                          AND a.attname IN ('singleton', 'pgtap_version', \
+                                            'artifact_sha256', 'zapadka_version')) = 4)",
             &[&TEST_SCHEMA],
         )
         .await
         .map_err(|error| registry_failed(error, "look for a previous installation"))?
         .get(0);
+
+    // And it must actually hold the marker row. A table of the right shape but
+    // no singleton row was not written by Zapadka's installer.
+    let legacy = legacy
+        && client
+            .query_one(
+                &format!(
+                    "SELECT count(*) = 1 FROM {}.zapadka_pgtap WHERE singleton",
+                    quote_identifier(TEST_SCHEMA)
+                ),
+                &[],
+            )
+            .await
+            .map_err(|error| registry_failed(error, "read the previous installation marker"))?
+            .get::<_, bool>(0);
     if legacy {
         return Ok(Installation::Stale {
             installed_version: "pgTAP".to_owned(),

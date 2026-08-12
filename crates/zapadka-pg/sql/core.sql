@@ -411,13 +411,30 @@ $$ LANGUAGE sql;
 CREATE OR REPLACE FUNCTION cmp_ok(anyelement, text, anyelement, text)
 RETURNS boolean AS $$
 DECLARE
-    result boolean;
+    result    boolean;
+    op_schema name;
+    op_name   name;
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_operator WHERE oprname = $2) THEN
-        RAISE EXCEPTION 'no operator named %', $2
+    -- Resolved against the search path rather than forced into pg_catalog: an
+    -- operator defined in an application schema is an ordinary thing to compare
+    -- with, and forcing the catalogue made those calls abort the file.
+    --
+    -- Both halves come back from the catalogue, so what gets interpolated is a
+    -- name PostgreSQL gave us. The operator symbol cannot be quoted as an
+    -- identifier -- OPERATOR("=") is not valid -- which is precisely why it has
+    -- to be looked up rather than taken on trust from the caller.
+    SELECT n.nspname, o.oprname INTO op_schema, op_name
+      FROM pg_catalog.pg_operator o
+      JOIN pg_catalog.pg_namespace n ON n.oid = o.oprnamespace
+     WHERE o.oprname = $2
+       AND pg_catalog.pg_operator_is_visible(o.oid)
+     LIMIT 1;
+
+    IF op_name IS NULL THEN
+        RAISE EXCEPTION 'no operator named % is visible', $2
             USING HINT = 'cmp_ok takes an operator such as ''='', ''<'' or ''@>''';
     END IF;
-    EXECUTE format('SELECT $1 OPERATOR(pg_catalog.%s) $2', $2)
+    EXECUTE format('SELECT $1 OPERATOR(%I.%s) $2', op_schema, op_name)
         INTO result USING $1, $3;
     RETURN _record(
         'cmp_ok',

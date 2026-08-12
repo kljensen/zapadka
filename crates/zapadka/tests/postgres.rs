@@ -984,7 +984,7 @@ fn every_public_assertion_resolves_and_passes() {
     report.assert_success();
 
     let assertions = report.json["tests"][0]["assertions"].as_array().unwrap();
-    assert_eq!(assertions.len(), 58, "the plan and the file must agree");
+    assert_eq!(assertions.len(), 60, "the plan and the file must agree");
 
     // The only non-passing entries should be the deliberate TODO and SKIP.
     let unusual: Vec<&str> = assertions
@@ -1016,7 +1016,7 @@ CREATE ROLE fixture_reader;
 GRANT USAGE ON SCHEMA fixture TO fixture_reader;
 GRANT SELECT ON fixture.orders TO fixture_reader;
 
-SELECT plan(58);
+SELECT plan(60);
 
 -- scalar
 SELECT ok(true, 'ok');
@@ -1046,6 +1046,8 @@ SELECT hasnt_view('fixture', 'nope');
 SELECT has_sequence('fixture', 'counter', 'has_sequence qualified');
 SELECT has_sequence('fixture'::name, 'counter'::name);
 SELECT hasnt_sequence('nope_seq', 'hasnt_sequence');
+SELECT hasnt_sequence('fixture'::name, 'nope_seq'::name);
+SELECT performs_within($$SELECT 1$$, 0, 60000);
 SELECT has_column('fixture', 'orders', 'status', 'has_column qualified');
 SELECT hasnt_column('fixture', 'orders', 'nope', 'hasnt_column qualified');
 SELECT has_pk('fixture', 'orders', 'has_pk');
@@ -1138,6 +1140,39 @@ fn a_schema_left_by_the_pgtap_era_is_replaced_rather_than_refused() {
         db.scalar("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace                    WHERE n.nspname = 'zapadka_test' AND c.relname = 'zapadka_pgtap'"),
         "0",
         "the old marker should be gone"
+    );
+}
+
+#[test]
+fn a_schema_that_merely_shares_a_name_is_not_dropped() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // Somebody else's schema that happens to hold a relation named
+    // `zapadka_pgtap`. Classifying it as a previous installation leads to
+    // DROP SCHEMA ... CASCADE, so the shape has to be checked and not just the
+    // name -- otherwise recognising the upgrade path becomes a way to destroy
+    // data.
+    db.query(
+        "DROP SCHEMA IF EXISTS zapadka_test CASCADE;          CREATE SCHEMA zapadka_test;          CREATE TABLE zapadka_test.zapadka_pgtap (whatever text);          INSERT INTO zapadka_test.zapadka_pgtap VALUES ('precious');",
+    );
+
+    project.test_file("orders.sql", "SELECT ok(true, 'x');");
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_failed("registry.upgrade_failed", exit::REGISTRY);
+
+    assert_eq!(
+        db.scalar("SELECT whatever FROM zapadka_test.zapadka_pgtap"),
+        "precious",
+        "an unrelated schema must survive"
     );
 }
 
