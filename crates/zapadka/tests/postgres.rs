@@ -22,6 +22,46 @@ mod exit {
 }
 
 #[test]
+fn a_failed_deploy_can_still_leave_the_database_changed() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-counter",
+        &[],
+        "CREATE SEQUENCE public.order_id;\nSELECT nextval('public.order_id');",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+    // Primed, so `last_value` moves rather than only `is_called` flipping.
+    let before = db.scalar("SELECT last_value FROM public.order_id");
+
+    // A migration that advances a sequence and then fails. PostgreSQL rolls
+    // back the registry row and every transactional effect -- but not
+    // nextval(), which is non-transactional by design.
+    project.migration(
+        "use-counter",
+        &[],
+        "SELECT nextval('public.order_id');\nSELECT 1 / 0;",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_failed("deploy.failed", exit::EXECUTION);
+
+    let after = db.scalar("SELECT last_value FROM public.order_id");
+    let applied = db.scalar("SELECT count(*) FROM zapadka.applied_migrations");
+
+    assert_eq!(
+        applied, "1",
+        "the failed migration is not recorded as applied"
+    );
+    assert_ne!(
+        before, after,
+        "the sequence advanced despite the rollback: {before} -> {after}"
+    );
+}
+
+#[test]
 fn deploys_an_empty_project_without_creating_anything_unexpected() {
     let db = database();
     let project = project();

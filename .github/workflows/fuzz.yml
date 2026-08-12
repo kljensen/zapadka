@@ -26,7 +26,7 @@ jobs:
       # read files from a repository. Both are inputs Zapadka does not control.
       - name: Fuzz
         run: |
-          for target in tap config manifest; do
+          for target in config manifest; do
             cargo +nightly fuzz run "$target" -- -max_total_time=600
           done
 

@@ -36,8 +36,15 @@ same plan.
 
 **Zapadka owns every transaction boundary.** A migration script cannot `BEGIN`,
 `COMMIT`, `ROLLBACK`, or `SAVEPOINT` — a pinned PostgreSQL 18 parser is compiled
-into the binary and rejects it before anything runs. That is what makes the
-applied state Zapadka records the same as the state the database is in.
+into the binary and rejects it before anything runs. So a migration's SQL and
+the row recording it as applied commit together: a crash leaves both or neither.
+
+That guarantee covers what PostgreSQL rolls back, and no more. A script that
+advances a sequence and then fails leaves the sequence advanced while Zapadka
+records the migration as not applied — `nextval()` is not transactional.
+Zapadka records **what it ran**, faithfully and immutably; it does not audit
+what the database now contains, and `baseline` and `resolve` write applied rows
+on an operator's word.
 
 **Deployed history is immutable.** Editing a migration that has already been
 applied is a hard error, not a warning and not a silent re-run. Corrective work

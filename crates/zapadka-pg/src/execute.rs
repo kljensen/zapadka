@@ -1,9 +1,9 @@
 //! Runner-owned execution.
 //!
 //! Zapadka opens and closes every transaction its scripts run in. A script
-//! never sees a transaction it can commit, roll back, or checkpoint, which is
-//! what makes the applied state Zapadka records the same as the state the
-//! database is actually in.
+//! never sees a transaction it can commit, roll back, or checkpoint, so a
+//! migration's SQL and the row recording it commit together — see `deploy` for
+//! what that guarantee does and does not cover.
 //!
 //! # Why verification always rolls back
 //!
@@ -120,10 +120,20 @@ impl Runner {
 
     /// Applies one migration inside a transaction Zapadka owns.
     ///
-    /// The migration's SQL and the row recording it as applied commit together.
-    /// Neither can exist without the other, so a crash at any instant leaves
-    /// either both or nothing — never a schema change Zapadka has forgotten
-    /// about, or a record of work that was rolled back.
+    /// The migration's SQL and the row recording it as applied commit together,
+    /// so a crash at any instant leaves either both or neither.
+    ///
+    /// That covers everything PostgreSQL rolls back, which is not everything a
+    /// migration can do. `nextval()` is the standard counter-example: a script
+    /// that advances a sequence and then fails leaves the sequence advanced
+    /// while Zapadka records the migration as not applied. The same is true of
+    /// anything a function does outside the database.
+    ///
+    /// So the honest guarantee is about *the registry and the script's
+    /// transactional effects* agreeing — not about the registry describing the
+    /// database. Zapadka records what it ran; it does not audit live state, and
+    /// `baseline` and `resolve` write applied rows from an operator's word
+    /// alone.
     pub async fn deploy(&mut self, migration: &Migration) -> Result<ScriptOutcome> {
         let started = Instant::now();
         let path = migration.deploy.relative_path.clone();
