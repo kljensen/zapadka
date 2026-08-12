@@ -3308,7 +3308,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "camino",
@@ -3345,7 +3345,7 @@ dependencies = [
 
 [[package]]
 name = "zapadka"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "camino",
  "clap",
@@ -3364,7 +3364,7 @@ dependencies = [
 
 [[package]]
 name = "zapadka-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "camino",
  "globset",
@@ -3383,7 +3383,7 @@ dependencies = [
 
 [[package]]
 name = "zapadka-parser"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cc",
  "serde_json",
@@ -3392,7 +3392,7 @@ dependencies = [
 
 [[package]]
 name = "zapadka-pg"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "camino",
  "rustls",
