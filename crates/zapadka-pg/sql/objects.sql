@@ -371,3 +371,61 @@ $$ LANGUAGE sql;
 CREATE OR REPLACE FUNCTION has_pk(name) RETURNS boolean AS $$
     SELECT has_pk($1, 'table ' || quote_ident($1) || ' should have a primary key');
 $$ LANGUAGE sql;
+
+-- -- Schema-qualified convenience overloads ---------------------------------
+--
+-- pgTAP ships these, and a file that used one would abort with "function does
+-- not exist" rather than recording a failed assertion -- the worst way to
+-- break, because it stops the file instead of reporting.
+
+CREATE OR REPLACE FUNCTION hasnt_table(name, name) RETURNS boolean AS $$
+    SELECT hasnt_table($1, $2,
+        'table ' || quote_ident($1) || '.' || quote_ident($2) || ' should not exist');
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION hasnt_view(name, name, text) RETURNS boolean AS $$
+    SELECT _record(
+        'hasnt_view',
+        NOT _relation_exists('{v,m}'::"char"[], $1, $2),
+        $3,
+        jsonb_build_object('schema', $1, 'view', $2)
+    );
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION hasnt_view(name, name) RETURNS boolean AS $$
+    SELECT hasnt_view($1, $2,
+        'view ' || quote_ident($1) || '.' || quote_ident($2) || ' should not exist');
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION has_sequence(name, name) RETURNS boolean AS $$
+    SELECT has_sequence($1, $2,
+        'sequence ' || quote_ident($1) || '.' || quote_ident($2) || ' should exist');
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION hasnt_sequence(name, text) RETURNS boolean AS $$
+    SELECT _record(
+        'hasnt_sequence',
+        NOT _relation_exists('{S}'::"char"[], $1),
+        $2,
+        jsonb_build_object('sequence', $1)
+    );
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION hasnt_sequence(name) RETURNS boolean AS $$
+    SELECT hasnt_sequence($1, 'sequence ' || quote_ident($1) || ' should not exist');
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION hasnt_column(name, name, name, text) RETURNS boolean AS $$
+    SELECT _record(
+        'hasnt_column',
+        NOT _column_exists($1, $2, $3),
+        $4,
+        jsonb_build_object('schema', $1, 'table', $2, 'column', $3)
+    );
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION hasnt_column(name, name, name) RETURNS boolean AS $$
+    SELECT hasnt_column($1, $2, $3,
+        'column ' || quote_ident($1) || '.' || quote_ident($2) || '.'
+                  || quote_ident($3) || ' should not exist');
+$$ LANGUAGE sql;

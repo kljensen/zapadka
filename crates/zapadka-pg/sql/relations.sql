@@ -333,7 +333,6 @@ DECLARE
     have_count bigint;
     want_count bigint;
     first_bad  bigint;
-    columns    name[];
     predicate  text;
     detail     jsonb;
 BEGIN
@@ -346,12 +345,37 @@ BEGIN
     -- Compared with IS DISTINCT FROM across the whole row, so NULL equals NULL
     -- -- which is what a test means by "the same row", and what plain `=` would
     -- get wrong.
-    columns := _column_names('__zapadka_have');
+    -- Paired by position, not by name. `results_eq` compares row *values*; two
+    -- queries producing the same values under different aliases are equal, and
+    -- naming both sides from the left query's columns would look for a column
+    -- the right side does not have.
     BEGIN
-        SELECT string_agg(format('h.%1$I IS DISTINCT FROM w.%1$I', c), ' OR ')
+        SELECT string_agg(
+                   format('h.%I IS DISTINCT FROM w.%I', pair.have_col, pair.want_col),
+                   ' OR ' ORDER BY pair.position
+               )
           INTO predicate
-          FROM unnest(columns) AS c
-         WHERE c <> '__position';
+          FROM (
+              SELECT h.position, h.column_name AS have_col, w.column_name AS want_col
+                FROM unnest(_column_names('__zapadka_have'))
+                     WITH ORDINALITY AS h(column_name, position)
+                JOIN unnest(_column_names('__zapadka_want'))
+                     WITH ORDINALITY AS w(column_name, position)
+                  ON w.position = h.position
+               WHERE h.column_name <> '__position'
+          ) AS pair;
+
+        -- A differing column count is a real difference, not a comparison to
+        -- attempt: pairing would silently ignore the extra columns.
+        IF array_length(_column_names('__zapadka_have'), 1)
+           IS DISTINCT FROM array_length(_column_names('__zapadka_want'), 1) THEN
+            RETURN _record('results_eq', false, $3, jsonb_build_object(
+                'kind', 'ordered',
+                'problem', 'the two queries return different numbers of columns',
+                'have_columns', _column_descriptors('__zapadka_have'),
+                'want_columns', _column_descriptors('__zapadka_want')
+            ));
+        END IF;
 
         EXECUTE format(
             'SELECT min(h.__position)

@@ -312,6 +312,21 @@ fn to_report(file: &testsuite::TestFile, outcome: &testrun::TestOutcome) -> Test
         .and_then(zapadka_core::testresult::TestDocument::planned)
         .map(u64::from);
 
+    let notes = outcome
+        .document
+        .as_ref()
+        .map(|document| {
+            document
+                .notes
+                .iter()
+                .map(|note| zapadka_core::report::TestNote {
+                    after_assertion: note.after_assertion.map(u64::from),
+                    message: note.message.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     TestFileReport {
         path: file.relative_path.clone(),
         sha256: file.sha256.clone(),
@@ -324,6 +339,7 @@ fn to_report(file: &testsuite::TestFile, outcome: &testrun::TestOutcome) -> Test
         planned,
         duration_ms: Some(outcome.duration_ms),
         error: outcome.error.as_ref().map(Into::into),
+        notes,
     }
 }
 

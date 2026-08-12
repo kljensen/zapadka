@@ -72,12 +72,24 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- The shorter forms are ambiguous by design, and pgTAP resolves the ambiguity
+-- by length: a five-byte second argument is a SQLSTATE, anything else is the
+-- expected message. Guessing differently would make
+-- `throws_ok(sql, 'some message')` fail as a malformed SQLSTATE, and
+-- `throws_ok(sql, '23505', 'expected message')` pass while ignoring the
+-- message entirely.
 CREATE OR REPLACE FUNCTION throws_ok(text, text, text) RETURNS boolean AS $$
-    SELECT throws_ok($1, $2, NULL::text, $3);
+    SELECT CASE
+        WHEN octet_length($2) = 5 THEN throws_ok($1, $2, $3, NULL::text)
+        ELSE throws_ok($1, NULL::text, $2, $3)
+    END;
 $$ LANGUAGE sql;
 
 CREATE OR REPLACE FUNCTION throws_ok(text, text) RETURNS boolean AS $$
-    SELECT throws_ok($1, $2, NULL::text, NULL::text);
+    SELECT CASE
+        WHEN octet_length($2) = 5 THEN throws_ok($1, $2, NULL::text, NULL::text)
+        ELSE throws_ok($1, NULL::text, $2, NULL::text)
+    END;
 $$ LANGUAGE sql;
 
 CREATE OR REPLACE FUNCTION throws_ok(text) RETURNS boolean AS $$

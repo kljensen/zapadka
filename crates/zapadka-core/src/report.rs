@@ -269,9 +269,26 @@ pub struct TestFile {
     /// Wall-clock duration in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
-    /// Why the file failed as a whole, e.g. a SQL error or malformed TAP.
+    /// Why the file failed as a whole, e.g. a SQL error.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ReportError>,
+    /// Notes the file wrote with `diag()`, in order.
+    ///
+    /// Kept at file level rather than folded into assertions because a note
+    /// written before the first assertion belongs to no assertion, and
+    /// attaching it to one anyway would misreport where it came from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<TestNote>,
+}
+
+/// A note a test file wrote with `diag()`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TestNote {
+    /// The assertion this note followed, when it followed one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_assertion: Option<u64>,
+    /// What the file said.
+    pub message: String,
 }
 
 /// One assertion within a test file.

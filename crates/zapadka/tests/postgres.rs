@@ -935,7 +935,7 @@ fn exception_privilege_and_type_assertions_work_and_report_structurally() {
         "CREATE ROLE reader;\n\
          GRANT SELECT ON public.orders TO reader;\n\
          SELECT throws_ok($$INSERT INTO public.orders VALUES (1,'dup')$$, '23505', \n\
-        \x20              'a duplicate key is rejected');\n\
+        \x20              NULL::text, 'a duplicate key is rejected');\n\
          SELECT throws_like($$SELECT * FROM public.nope$$, '%does not exist%', \n\
         \x20              'a missing relation is named');\n\
          SELECT lives_ok($$SELECT 1$$, 'a trivial query lives');\n\
@@ -963,6 +963,78 @@ fn exception_privilege_and_type_assertions_work_and_report_structurally() {
         ],
         "only the last assertion should fail: {statuses:?}"
     );
+}
+
+#[test]
+fn throws_ok_reads_a_five_byte_argument_as_a_sqlstate() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint PRIMARY KEY);\n\
+         INSERT INTO public.orders VALUES (1);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // pgTAP disambiguates the short forms by length: a five-byte second
+    // argument is a SQLSTATE, anything else is the expected message. It is a
+    // trap -- the third argument is then the expected *message*, not a
+    // description -- but it is the trap every pgTAP file was written against,
+    // and quietly choosing differently would make `throws_ok(sql, 'boom')`
+    // fail as a malformed SQLSTATE.
+    project.test_file(
+        "checks.sql",
+        "SELECT throws_ok($$INSERT INTO public.orders VALUES (1)$$, '23505');\n\
+         SELECT throws_ok($$SELECT 1/0$$, 'division by zero');\n\
+         SELECT throws_ok($$SELECT 1/0$$, 'not the message it raises');",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_failed("verify.failed", exit::EXECUTION);
+    let statuses: Vec<&str> = report.json["tests"][0]["assertions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["status"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        statuses,
+        vec!["passed", "passed", "failed"],
+        "five bytes is a sqlstate; anything else is a message: {statuses:?}"
+    );
+}
+
+#[test]
+fn a_test_files_notes_reach_the_report() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    project.test_file(
+        "checks.sql",
+        "SELECT diag('setup context, before any assertion');\n\
+         SELECT ok(false, 'this fails');\n\
+         SELECT diag('why it failed');",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_failed("verify.failed", exit::EXECUTION);
+    let notes = report.json["tests"][0]["notes"].as_array().unwrap();
+    assert_eq!(notes.len(), 2);
+    // The first belongs to no assertion, and saying otherwise would misreport
+    // where it came from.
+    assert!(notes[0].get("after_assertion").is_none());
+    assert_eq!(notes[1]["after_assertion"], 1);
 }
 
 #[test]

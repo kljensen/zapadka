@@ -214,6 +214,25 @@ fn write_test_file(test: &TestFile, out: &mut impl Write) -> std::io::Result<()>
         for (key, value) in &assertion.diagnostics {
             writeln!(out, "      {key}: {value}")?;
         }
+        // A note written right after an assertion is nearly always context for
+        // it, so it belongs next to it rather than in a block further down.
+        for note in test
+            .notes
+            .iter()
+            .filter(|note| note.after_assertion == Some(assertion.number))
+        {
+            writeln!(out, "      note: {}", note.message)?;
+        }
+    }
+
+    // Notes written before any assertion have no assertion to sit under, and
+    // are usually setup context worth printing anyway.
+    for note in test
+        .notes
+        .iter()
+        .filter(|note| note.after_assertion.is_none())
+    {
+        writeln!(out, "    note: {}", note.message)?;
     }
     Ok(())
 }
