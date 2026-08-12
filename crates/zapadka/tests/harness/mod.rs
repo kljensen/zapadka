@@ -63,9 +63,69 @@ struct Postgres {
     port: u16,
 }
 
+/// Removes containers this harness leaked on previous runs.
+///
+/// `testcontainers` 0.28 has no reaper process: a container is removed by its
+/// `Drop`, and the one below lives in a `static`, which Rust never drops at
+/// process exit. So every run of a test binary leaves its database behind, and
+/// they accumulate without limit -- this was found after 182 of them had piled
+/// up, holding 15GB.
+///
+/// Sweeping at startup rather than at exit is what is actually expressible:
+/// there is no hook that runs after the last test. It bounds the leak to the
+/// containers currently in flight instead of every run ever made.
+///
+/// The filter is deliberately narrow -- this harness's exact pinned digest, and
+/// only containers `testcontainers` created. It cannot match a PostgreSQL a
+/// developer is running for anything else, because no other container shares
+/// that digest *and* that label.
+///
+/// The one case it gets wrong is two test binaries running at once, where the
+/// second would remove the first's container. `cargo test` runs binaries
+/// sequentially, so this needs two terminals to hit; set
+/// `ZAPADKA_KEEP_TEST_CONTAINERS=1` when doing that deliberately.
+fn sweep_leaked_containers() {
+    if std::env::var_os("ZAPADKA_KEEP_TEST_CONTAINERS").is_some() {
+        return;
+    }
+
+    let listed = std::process::Command::new("docker")
+        .args([
+            "ps",
+            "-aq",
+            "--filter",
+            &format!("ancestor={IMAGE_NAME}:{IMAGE_DIGEST}"),
+            "--filter",
+            "label=org.testcontainers.managed-by",
+        ])
+        .output();
+    let Ok(listed) = listed else {
+        // No Docker is a problem the container start will report far better
+        // than a failed cleanup would.
+        return;
+    };
+
+    let ids: Vec<&str> = std::str::from_utf8(&listed.stdout)
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+
+    // `-v` matters as much as the removal: each of these owns an anonymous
+    // volume holding a PostgreSQL data directory, and removing the container
+    // without it leaves ~80MB orphaned per run.
+    let _ = std::process::Command::new("docker")
+        .args(["rm", "-f", "-v"])
+        .args(&ids)
+        .output();
+}
+
 /// Returns the shared container, starting it on first use.
 fn postgres() -> &'static Postgres {
     POSTGRES.get_or_init(|| {
+        sweep_leaked_containers();
         let container = GenericImage::new(IMAGE_NAME, IMAGE_DIGEST)
             .with_exposed_port(5432.tcp())
             // The image logs this line twice: once after its bootstrap pass and
