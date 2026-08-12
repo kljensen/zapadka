@@ -8,6 +8,7 @@
 //! ever sent as raw SQL. Every query Zapadka issues about its own state uses
 //! bound parameters and the extended protocol.
 
+pub mod capture;
 pub mod connect;
 pub mod error;
 pub mod execute;

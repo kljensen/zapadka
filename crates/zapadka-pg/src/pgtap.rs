@@ -40,6 +40,17 @@ const PGTAP_NUMERIC_VERSION: &str = "1.3";
 /// proves this file has not been edited.
 const PGTAP_SOURCE: &str = include_str!("../../../third_party/pgtap/sql/pgtap.sql.in");
 
+/// Zapadka's own assertion library.
+///
+/// Installed in place of pgTAP. See
+/// `docs/adr/0006-own-a-native-sql-assertion-library.md`.
+/// The library, in installation order: the core defines `_record`, which every
+/// assertion in the later files calls.
+const NATIVE_SOURCE: &[(&str, &str)] = &[
+    ("core", include_str!("../sql/core.sql")),
+    ("objects", include_str!("../sql/objects.sql")),
+];
+
 /// What is installed in a target's test schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Installation {
@@ -82,10 +93,14 @@ pub fn artifact_sha256() -> String {
     use std::fmt::Write as _;
 
     let mut hasher = Sha256::new();
-    hasher.update(b"zapadka.pgtap.v1\n");
-    hasher.update(PGTAP_VERSION.as_bytes());
+    hasher.update(b"zapadka.testlib.v1\n");
+    hasher.update(crate::capture::PROTOCOL_VERSION.to_string().as_bytes());
     hasher.update(b"\n");
-    hasher.update(PGTAP_SOURCE.as_bytes());
+    for (part, sql) in NATIVE_SOURCE {
+        hasher.update(part.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(sql.as_bytes());
+    }
     let digest = hasher.finalize();
     digest
         .iter()
@@ -186,9 +201,8 @@ pub async fn installed(client: &Client) -> Result<Installation> {
 ///
 /// The whole install runs in one transaction: a half-installed assertion
 /// library would produce test failures that look like application bugs.
-pub async fn install(client: &mut Client, server_version: &str) -> Result<String> {
+pub async fn install(client: &mut Client, _server_version: &str) -> Result<String> {
     let quoted = quote_identifier(TEST_SCHEMA);
-    let os = os_from_version(server_version);
     let sha256 = artifact_sha256();
 
     let transaction = client
@@ -216,10 +230,14 @@ pub async fn install(client: &mut Client, server_version: &str) -> Result<String
         .await
         .map_err(|error| registry_failed(error, "set the install search path"))?;
 
-    transaction
-        .batch_execute(&artifact(&os))
-        .await
-        .map_err(|error| registry_failed(error, "install pgTAP"))?;
+    for (part, sql) in NATIVE_SOURCE {
+        transaction.batch_execute(sql).await.map_err(|error| {
+            registry_failed(
+                error,
+                &format!("install the test assertion library ({part})"),
+            )
+        })?;
+    }
 
     transaction
         .batch_execute(&format!(

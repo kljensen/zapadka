@@ -842,7 +842,7 @@ fn runs_database_tests_against_a_prepared_target() {
         db.scalar("SELECT count(*) FROM pg_extension WHERE extname = 'pgtap'"),
         "0"
     );
-    assert_eq!(db.scalar("SELECT zapadka_test.pgtap_version()"), "1.3");
+    assert_eq!(db.scalar("SELECT zapadka_test.zapadka_test_version()"), "1");
 }
 
 #[test]
@@ -914,7 +914,7 @@ fn a_test_file_cannot_leave_anything_behind() {
 }
 
 #[test]
-fn a_test_file_with_no_plan_is_a_failure_not_a_pass() {
+fn a_plan_is_optional_but_a_wrong_one_fails() {
     let db = database();
     let project = project();
     project.migration(
@@ -926,20 +926,34 @@ fn a_test_file_with_no_plan_is_a_failure_not_a_pass() {
         .report(&["deploy", "--uri", &db.uri()])
         .assert_success();
 
-    // Emits a passing assertion and then stops. Without the plan check this
-    // would look like a pass, which is the failure mode that matters most.
+    // A file with no plan at all. Under TAP this had to fail: `1..N` was the
+    // only way a text consumer could tell a finished stream from a truncated
+    // one. Reading a table, the runner knows the transaction completed, so the
+    // ceremony buys nothing and the file is simply valid.
     project.test_file("orders.sql", "SELECT ok(true, 'looks fine');");
-
-    // pgTAP itself refuses to run an assertion before a plan, so the failure
-    // arrives as a SQL error rather than as unparseable TAP. Either way the run
-    // fails, which is the property that matters.
     let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_success();
+    assert_eq!(
+        report.json["tests"][0]["assertions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // A plan that disagrees with what ran is still a failure, and now it is one
+    // the runner enforces. pgTAP could only ever report this as a diagnostic.
+    project.test_file(
+        "mismatch.sql",
+        "SELECT plan(3); SELECT ok(true, 'only one'); SELECT finish();",
+    );
+    let report = project.report(&["test", "mismatch.sql", "--uri", &db.uri()]);
     report.assert_failed("verify.failed", exit::EXECUTION);
     let message = report.json["tests"][0]["error"]["message"]
         .as_str()
         .unwrap_or_default()
         .to_lowercase();
-    assert!(message.contains("plan"), "{message}");
+    assert!(message.contains("planned 3"), "{message}");
 }
 
 #[test]

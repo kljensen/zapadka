@@ -14,6 +14,15 @@ CREATE OR REPLACE FUNCTION _protocol_version() RETURNS integer AS $$
     SELECT 1;
 $$ LANGUAGE sql IMMUTABLE;
 
+-- The installed library's version, for a person inspecting a database.
+--
+-- Deliberately not `pgtap_version()`: this is not pgTAP, and answering to that
+-- name would tell a test file it could rely on pgTAP behaviour Zapadka does not
+-- implement.
+CREATE OR REPLACE FUNCTION zapadka_test_version() RETURNS text AS $$
+    SELECT '1';
+$$ LANGUAGE sql IMMUTABLE;
+
 -- Creates the per-file capture tables.
 --
 -- Called by the runner inside the transaction it owns, so `ON COMMIT DROP`

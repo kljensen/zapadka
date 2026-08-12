@@ -13,4 +13,5 @@ pub mod manifest;
 pub mod migration;
 pub mod report;
 pub mod tap;
+pub mod testresult;
 pub mod testsuite;
