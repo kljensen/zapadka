@@ -14,9 +14,9 @@ pub mod error;
 pub mod execute;
 pub mod history;
 pub mod lock;
-pub mod pgtap;
 pub mod registry;
 pub mod service;
+pub mod testlib;
 pub mod testrun;
 
 pub use connect::{Connection, Resolved, Source, connect, resolve};

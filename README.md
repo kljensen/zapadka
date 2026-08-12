@@ -5,9 +5,8 @@ A static PostgreSQL migration and database-test tool, inspired by Sqitch and pgT
 One binary. No Perl, no `psql`, no libpq, no OpenSSL, no PostgreSQL client
 installation, and no separately installed test framework.
 
-> **Status: pre-alpha.** Every command below works and is tested against
-> PostgreSQL 18. Nontransactional migrations are the significant gap. See
-> [Limitations](#limitations).
+> **Status: early.** Every command below works and is tested against
+> PostgreSQL 18. See [Limitations](#limitations).
 
 ## What it is
 
@@ -61,6 +60,37 @@ WITH expected(id) AS (VALUES (1::bigint), (2::bigint))
 SELECT 1 / (CASE WHEN (SELECT count(*) FROM app.orders)
                  = (SELECT count(*) FROM expected) THEN 1 ELSE 0 END);
 ```
+
+**Tests are SQL, and so are their results.** `zapadka test` ships a SQL
+assertion library that installs into a reserved schema on a test target — no
+extension, no `CREATE EXTENSION`, nothing on the server's filesystem. It carries
+pgTAP's names and argument types, because that is a good API a lot of people
+already know:
+
+```sql
+SELECT has_table('app', 'orders');
+SELECT col_is_pk('app', 'orders', 'id');
+SELECT set_eq(
+    'SELECT status FROM app.orders',
+    ARRAY['paid', 'pending'],
+    'only these statuses occur');
+SELECT throws_ok($$INSERT INTO app.orders VALUES (1)$$, '23505');
+```
+
+It is not pgTAP, and it emits no TAP. Assertions record **typed rows** — outcome,
+number, directive, and structured detail — which Zapadka reads directly. So a
+failure can say which rows differed and what their types were, rather than
+handing you two rendered strings to compare by eye:
+
+```json
+{ "columns": [{"name": "id", "type": "bigint"}],
+  "missing": [[2]], "extra": [[3]], "missing_count": 1, "extra_count": 1 }
+```
+
+Assertions return `boolean`, so a file stays readable in `psql`. `plan()` and
+`finish()` are supported but never required: `1..N` existed so a *text* consumer
+could spot a truncated stream, and there is no text consumer. A declared plan is
+enforced. A test file may return whatever it likes; only its assertions count.
 
 **Database tests are isolated, with one documented exception.** Each test file
 runs on a fresh connection in a transaction Zapadka always rolls back, so no

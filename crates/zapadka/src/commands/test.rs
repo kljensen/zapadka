@@ -18,11 +18,11 @@
 //!
 //! # Why the whole suite holds the deployment lock
 //!
-//! A suite is not read-only: it installs pgTAP, and it restores sequence
+//! A suite is not read-only: it installs the assertion library, and it restores sequence
 //! positions after each file. Two suites overlapping on one target would race
 //! on both — and each one's sequence restoration would undo the other's. A
 //! suite overlapping a deploy would run against a schema changing underneath
-//! it. So the lock is held from before the pgTAP install until after the last
+//! it. So the lock is held from before that install until after the last
 //! file, and every per-file connection runs inside it.
 
 use zapadka_core::config::LoadedConfig;
@@ -31,7 +31,7 @@ use zapadka_core::graph::Graph;
 use zapadka_core::report::{Assertion, AssertionStatus, Status, TestFile as TestFileReport};
 use zapadka_core::testresult::Directive;
 use zapadka_core::testsuite;
-use zapadka_pg::{history, lock, pgtap, testrun};
+use zapadka_pg::{history, lock, testlib, testrun};
 
 use crate::cli::TestArgs;
 use crate::commands::target;
@@ -80,7 +80,7 @@ pub async fn run(
     let timeouts = opened.timeouts;
     let mut client = opened.connection.client;
 
-    // Taken before the pgTAP install and held until the last file has run.
+    // Taken before the library install and held until the last file has run.
     let held = lock::acquire(
         &client,
         config.config.project.id,
@@ -147,7 +147,7 @@ async fn run_suite(
         ));
     }
 
-    ensure_pgtap(client, server_version, session).await?;
+    ensure_library(client, server_version, session).await?;
 
     let mut failures = 0usize;
     for file in selected {
@@ -200,35 +200,35 @@ async fn run_suite(
     ))
 }
 
-/// Installs pgTAP when it is absent or stale.
-async fn ensure_pgtap(
+/// Installs the assertion library when it is absent or stale.
+async fn ensure_library(
     client: &mut zapadka_pg::Client,
     server_version: &str,
     session: &mut Session,
 ) -> Result<()> {
-    let installed = pgtap::installed(client).await?;
+    let installed = testlib::installed(client).await?;
     let reason = match &installed {
-        pgtap::Installation::Current => return Ok(()),
-        pgtap::Installation::Absent => "it was not installed".to_owned(),
-        pgtap::Installation::Stale {
+        testlib::Installation::Current => return Ok(()),
+        testlib::Installation::Absent => "it was not installed".to_owned(),
+        testlib::Installation::Stale {
             installed_version, ..
-        } => format!("the installed artifact is pgTAP {installed_version}"),
+        } => format!("the installed library is version {installed_version}"),
     };
 
-    pgtap::install(client, server_version).await?;
+    testlib::install(client, server_version).await?;
     session.diagnose(zapadka_core::report::Diagnostic {
         severity: zapadka_core::report::Severity::Note,
         code: "test.library_installed".to_owned(),
         message: format!(
             "installed Zapadka's test assertions ({}) into {} because {reason}",
-            pgtap::TEST_LIBRARY_VERSION,
-            pgtap::TEST_SCHEMA
+            testlib::TEST_LIBRARY_VERSION,
+            testlib::TEST_SCHEMA
         ),
         migration_id: None,
         location: None,
         hint: Some(format!(
             "{} holds no application data and is safe to drop",
-            pgtap::TEST_SCHEMA
+            testlib::TEST_SCHEMA
         )),
     });
     Ok(())

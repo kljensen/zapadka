@@ -1,9 +1,22 @@
-# Provenance for the pgTAP assertion library shipped inside the Zapadka binary.
+# Provenance for pgTAP, retained as reference material.
 #
-# `cargo xtask verify-fixtures` re-hashes this tree and fails on any missing,
-# modified, or unrecorded file. Vendored files are never edited in place; the
-# transformation Zapadka applies is described under [artifact] below and is
-# performed at install time, not by editing the source.
+# Zapadka no longer installs pgTAP. It ships its own SQL assertion library,
+# which carries pgTAP's public names and argument types but records typed rows
+# instead of producing TAP -- see
+# docs/adr/0006-own-a-native-sql-assertion-library.md.
+#
+# This tree is kept for three reasons, none of which involve executing it:
+#
+#   1. Attribution. Zapadka's library is a derivative work: its API, and in
+#      places its catalogue queries, come from here. The PostgreSQL Licence
+#      permits that and requires the notice, which README.md carries.
+#   2. A conformance reference. When Zapadka's behaviour for an assertion is in
+#      question, upstream's implementation is the thing to read.
+#   3. Evidence of what was derived from, at a fixed revision, so the claim can
+#      be checked rather than taken on trust.
+#
+# `cargo xtask verify-fixtures` still re-hashes the tree and fails on any
+# missing, modified, or unrecorded file. Vendored files are never edited.
 
 format_version = 1
 
@@ -57,25 +70,8 @@ travels with the code rather than being paraphrased.
 """
 
 [artifact]
-# The upstream Makefile builds the installable SQL from `sql/pgtap.sql.in` by
-# applying compatibility patches for old PostgreSQL versions and substituting
-# three placeholders. Zapadka supports PostgreSQL 18 only, so none of the
-# patches apply -- every one is gated on a 9.x version -- and MODULE_PATHNAME
-# does not occur in this release. That leaves two substitutions, which Zapadka
-# performs itself rather than shelling out to make.
-substitutions = ["__VERSION__", "__OS__"]
-
-# `__VERSION__` becomes pgTAP's own major.minor, as `pgtap_version()` returns it.
-version = "1.3"
-
-# `__OS__` becomes the *server's* operating system, derived from the server's
-# own version() string. Upstream's Makefile uses the build machine's `uname`,
-# which would be wrong here: Zapadka frequently runs on one operating system
-# and installs into a database on another.
-os_source = "server version() string"
-
-# This release contains no `LANGUAGE C` functions and no `@extschema@`
-# references, which is what lets Zapadka install it into an ordinary schema
-# without a shared library and without CREATE EXTENSION.
-requires_shared_library = false
-requires_extension = false
+# Nothing here is installed, so nothing is substituted. Zapadka previously
+# replaced `__VERSION__` and `__OS__` in sql/pgtap.sql.in at install time; it
+# now installs its own library instead, and the placeholders in this tree are
+# left exactly as upstream wrote them.
+installed = false

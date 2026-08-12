@@ -38,7 +38,7 @@ use zapadka_core::testsuite::TestFile;
 
 use crate::error::registry_failed;
 use crate::execute::Timeouts;
-use crate::pgtap;
+use crate::testlib;
 
 /// What one test file did.
 #[derive(Debug)]
@@ -123,7 +123,7 @@ async fn run_inner(
     transaction
         .batch_execute(&format!(
             "SET LOCAL search_path = {};",
-            pgtap::test_search_path(application_schemas)
+            testlib::test_search_path(application_schemas)
         ))
         .await
         .map_err(|error| registry_failed(error, "set the test search path"))?;
@@ -215,7 +215,7 @@ async fn snapshot_sequences(client: &Client) -> Result<Vec<SequenceState>> {
                AND has_sequence_privilege( \
                      format('%I.%I', schemaname, sequencename), 'USAGE,UPDATE') \
              ORDER BY 1",
-            &[&pgtap::TEST_SCHEMA],
+            &[&testlib::TEST_SCHEMA],
         )
         .await
         .map_err(|error| registry_failed(error, "list sequences"))?;

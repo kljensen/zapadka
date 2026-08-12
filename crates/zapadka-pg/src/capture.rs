@@ -28,7 +28,7 @@ pub const PROTOCOL_VERSION: i32 = 1;
 /// schema, and threading a schema through here only creates the opportunity to
 /// pass the registry's by mistake.
 pub async fn begin(transaction: &Transaction<'_>) -> Result<()> {
-    let quoted = crate::registry::quote_identifier(crate::pgtap::TEST_SCHEMA);
+    let quoted = crate::registry::quote_identifier(crate::testlib::TEST_SCHEMA);
     transaction
         .batch_execute(&format!("SELECT {quoted}._begin_run()"))
         .await
@@ -73,7 +73,7 @@ pub async fn read(transaction: &Transaction<'_>) -> Result<TestDocument> {
         .with_hint(format!(
             "drop the {} schema so the matching library is installed, or use the Zapadka that \
              installed it",
-            crate::pgtap::TEST_SCHEMA
+            crate::testlib::TEST_SCHEMA
         )));
     }
 
