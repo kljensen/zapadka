@@ -218,10 +218,10 @@ async fn ensure_pgtap(
     pgtap::install(client, server_version).await?;
     session.diagnose(zapadka_core::report::Diagnostic {
         severity: zapadka_core::report::Severity::Note,
-        code: "test.pgtap_installed".to_owned(),
+        code: "test.library_installed".to_owned(),
         message: format!(
-            "installed pgTAP {} into {} because {reason}",
-            pgtap::PGTAP_VERSION,
+            "installed Zapadka's test assertions ({}) into {} because {reason}",
+            pgtap::TEST_LIBRARY_VERSION,
             pgtap::TEST_SCHEMA
         ),
         migration_id: None,

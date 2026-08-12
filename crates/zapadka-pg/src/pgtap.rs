@@ -31,6 +31,13 @@ pub const TEST_SCHEMA: &str = "zapadka_test";
 /// The pgTAP release embedded in this binary.
 pub const PGTAP_VERSION: &str = "1.3.4";
 
+/// The version of Zapadka's own assertion library.
+///
+/// Reported to operators and recorded in the installed schema. Distinct from
+/// the capture protocol: the protocol changes when the *tables* change, this
+/// changes when the assertions do.
+pub const TEST_LIBRARY_VERSION: &str = "1";
+
 /// The `major.minor` value `pgtap_version()` returns.
 const PGTAP_NUMERIC_VERSION: &str = "1.3";
 
@@ -218,7 +225,8 @@ pub async fn install(client: &mut Client, _server_version: &str) -> Result<Strin
             "DROP SCHEMA IF EXISTS {quoted} CASCADE;\n\
              CREATE SCHEMA {quoted};\n\
              COMMENT ON SCHEMA {quoted} IS \
-             'pgTAP {PGTAP_VERSION}, installed by Zapadka. Safe to drop; contains no application data.';"
+             'Zapadka test assertions {TEST_LIBRARY_VERSION}, installed by Zapadka. Safe to \
+              drop; contains no application data.';"
         ))
         .await
         .map_err(|error| registry_failed(error, "create the test schema"))?;
@@ -258,7 +266,7 @@ pub async fn install(client: &mut Client, _server_version: &str) -> Result<Strin
                 "INSERT INTO {quoted}.zapadka_pgtap \
                     (pgtap_version, artifact_sha256, zapadka_version) VALUES ($1, $2, $3)"
             ),
-            &[&PGTAP_VERSION, &sha256, &env!("CARGO_PKG_VERSION")],
+            &[&TEST_LIBRARY_VERSION, &sha256, &env!("CARGO_PKG_VERSION")],
         )
         .await
         .map_err(|error| registry_failed(error, "record the pgTAP installation"))?;
