@@ -38,9 +38,24 @@ compiled into it.
   migration commits, in a read-only transaction that is always rolled back. A
   failed verification stops the run and leaves the committed migration applied;
   Zapadka never reverts automatically.
-- **Database tests** run against an explicitly named target with a vendored,
-  pinned pgTAP installed into a reserved `zapadka_test` schema — no extension
-  and no test framework on your production databases.
+- **Database tests are SQL, and so are their results.** Zapadka ships its own
+  SQL assertion library into a reserved `zapadka_test` schema on an explicitly
+  named test target — no extension, nothing on the server's filesystem, and
+  nothing on your production databases. It carries pgTAP's names and argument
+  types, because that is a good API a lot of people already know:
+
+  ```sql
+  SELECT has_table('app', 'orders', 'the orders table exists');
+  SELECT set_eq('SELECT status FROM app.orders', ARRAY['paid', 'pending']);
+  SELECT throws_ok($$INSERT INTO app.orders VALUES (1)$$, '23505');
+  ```
+
+  It emits no TAP. Assertions record **typed rows** and return `boolean`, so a
+  file stays readable in `psql` while the runner reads a table. A failing
+  comparison reports the differing rows with their column names and types
+  rather than two rendered strings to diff by eye. `plan()` and `finish()` are
+  supported but never required — and a declared plan is now enforced rather
+  than merely reported.
 - Deployments are serialized by a session-scoped advisory lock, and contention
   reports who holds it.
 - Every command emits one versioned `ReportV1`; `--output json` writes exactly
