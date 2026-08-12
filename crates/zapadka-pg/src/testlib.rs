@@ -112,6 +112,28 @@ pub async fn installed(client: &Client) -> Result<Installation> {
     }
 
     let quoted = quote_identifier(TEST_SCHEMA);
+
+    // A target tested by an earlier Zapadka carries `zapadka_pgtap` instead.
+    // Without this it would look like a schema Zapadka did not create, and the
+    // operator would be told to rename or drop a schema Zapadka had put there
+    // itself -- an upgrade that blocks on a lie.
+    let legacy: bool = client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_class c \
+               JOIN pg_namespace n ON n.oid = c.relnamespace \
+              WHERE n.nspname = $1 AND c.relname = 'zapadka_pgtap')",
+            &[&TEST_SCHEMA],
+        )
+        .await
+        .map_err(|error| registry_failed(error, "look for a previous installation"))?
+        .get(0);
+    if legacy {
+        return Ok(Installation::Stale {
+            installed_version: "pgTAP".to_owned(),
+            installed_sha256: String::new(),
+        });
+    }
+
     let marker = match client
         .query_opt(
             &format!("SELECT artifact_sha256, library_version FROM {quoted}.zapadka_testlib"),
@@ -133,7 +155,7 @@ pub async fn installed(client: &Client) -> Result<Installation> {
             None
         }
         Err(error) => {
-            return Err(registry_failed(error, "read the pgTAP installation marker"));
+            return Err(registry_failed(error, "read the installation marker"));
         }
     };
 

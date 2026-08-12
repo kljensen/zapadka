@@ -225,12 +225,25 @@ fn write_test_file(test: &TestFile, out: &mut impl Write) -> std::io::Result<()>
         }
     }
 
-    // Notes written before any assertion have no assertion to sit under, and
-    // are usually setup context worth printing anyway.
+    // Everything else: notes written before any assertion, and notes that
+    // followed an assertion which passed and so was not printed above. Both
+    // would otherwise sit in the JSON and be invisible to a person, which is
+    // the worst place for the two renderings to disagree.
+    let shown: Vec<u64> = test
+        .assertions
+        .iter()
+        .filter(|assertion| {
+            matches!(
+                assertion.status,
+                AssertionStatus::Failed | AssertionStatus::TodoFailed
+            )
+        })
+        .map(|assertion| assertion.number)
+        .collect();
     for note in test
         .notes
         .iter()
-        .filter(|note| note.after_assertion.is_none())
+        .filter(|note| note.after_assertion.is_none_or(|n| !shown.contains(&n)))
     {
         writeln!(out, "    note: {}", note.message)?;
     }

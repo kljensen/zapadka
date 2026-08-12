@@ -293,8 +293,19 @@ DECLARE
 BEGIN
     PERFORM _materialise('__zapadka_have', $1);
     PERFORM _materialise('__zapadka_want', $2);
-    PERFORM _difference('__zapadka_missing', '__zapadka_want', '__zapadka_have', false);
-    PERFORM _difference('__zapadka_extra', '__zapadka_have', '__zapadka_want', false);
+
+    -- Incomparable shapes are a failed assertion, not an aborted file. `set_eq`
+    -- already treats them that way, and a file that stops at the first
+    -- mismatched query reports nothing about the assertions after it.
+    BEGIN
+        PERFORM _difference('__zapadka_missing', '__zapadka_want', '__zapadka_have', false);
+        PERFORM _difference('__zapadka_extra', '__zapadka_have', '__zapadka_want', false);
+    EXCEPTION WHEN datatype_mismatch OR syntax_error_or_access_rule_violation THEN
+        -- Queries that cannot be compared are certainly not the same set, so
+        -- this is the one comparison where an incomparable shape is a pass.
+        RETURN _record('set_ne', true, $3, NULL);
+    END;
+
     same := _count_of('__zapadka_missing') = 0 AND _count_of('__zapadka_extra') = 0;
     RETURN _record('set_ne', NOT same, $3,
         CASE WHEN same THEN jsonb_build_object(

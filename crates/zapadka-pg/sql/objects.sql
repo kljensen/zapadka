@@ -429,3 +429,28 @@ CREATE OR REPLACE FUNCTION hasnt_column(name, name, name) RETURNS boolean AS $$
         'column ' || quote_ident($1) || '.' || quote_ident($2) || '.'
                   || quote_ident($3) || ' should not exist');
 $$ LANGUAGE sql;
+
+-- The remaining col_is_pk shapes pgTAP ships.
+--
+-- Note that three bare literals resolve to `(name, name, text)` -- the
+-- unqualified form with a description -- because `text` is preferred among
+-- unknown literals. That is pgTAP's behaviour too, so the qualified
+-- three-argument form is reached with explicit `::name` casts or by passing a
+-- description as a fourth argument.
+CREATE OR REPLACE FUNCTION col_is_pk(name, name, name) RETURNS boolean AS $$
+    SELECT col_is_pk($1, $2, ARRAY[$3]::name[],
+        'column ' || quote_ident($1) || '.' || quote_ident($2) || '.'
+                  || quote_ident($3) || ' should be the primary key');
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION col_is_pk(name, name, name[]) RETURNS boolean AS $$
+    SELECT col_is_pk($1, $2, $3,
+        'table ' || quote_ident($1) || '.' || quote_ident($2)
+        || ' should have primary key (' || array_to_string($3, ', ') || ')');
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION col_is_pk(name, name[]) RETURNS boolean AS $$
+    SELECT col_is_pk($1, $2,
+        'table ' || quote_ident($1) || ' should have primary key ('
+        || array_to_string($2, ', ') || ')');
+$$ LANGUAGE sql;

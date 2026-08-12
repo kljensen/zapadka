@@ -69,7 +69,7 @@ already know:
 
 ```sql
 SELECT has_table('app', 'orders');
-SELECT col_is_pk('app', 'orders', 'id');
+SELECT col_is_pk('app', 'orders', 'id', 'id is the primary key');
 SELECT set_eq(
     'SELECT status FROM app.orders',
     ARRAY['paid', 'pending'],

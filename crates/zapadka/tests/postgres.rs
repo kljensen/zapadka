@@ -984,7 +984,7 @@ fn every_public_assertion_resolves_and_passes() {
     report.assert_success();
 
     let assertions = report.json["tests"][0]["assertions"].as_array().unwrap();
-    assert_eq!(assertions.len(), 55, "the plan and the file must agree");
+    assert_eq!(assertions.len(), 58, "the plan and the file must agree");
 
     // The only non-passing entries should be the deliberate TODO and SKIP.
     let unusual: Vec<&str> = assertions
@@ -1016,7 +1016,7 @@ CREATE ROLE fixture_reader;
 GRANT USAGE ON SCHEMA fixture TO fixture_reader;
 GRANT SELECT ON fixture.orders TO fixture_reader;
 
-SELECT plan(55);
+SELECT plan(58);
 
 -- scalar
 SELECT ok(true, 'ok');
@@ -1050,6 +1050,12 @@ SELECT has_column('fixture', 'orders', 'status', 'has_column qualified');
 SELECT hasnt_column('fixture', 'orders', 'nope', 'hasnt_column qualified');
 SELECT has_pk('fixture', 'orders', 'has_pk');
 SELECT col_is_pk('fixture', 'orders', 'id', 'col_is_pk');
+SELECT col_is_pk('fixture'::name, 'orders'::name, 'id'::name);
+SELECT col_is_pk('fixture'::name, 'orders'::name, ARRAY['id']::name[]);
+-- Queries that cannot be compared are certainly not the same set, and this
+-- must record an assertion rather than abort the file.
+SELECT set_ne('SELECT id, status FROM fixture.orders', 'SELECT id FROM fixture.orders',
+              'set_ne on incomparable shapes');
 
 -- relations
 SELECT set_eq('SELECT status FROM fixture.orders', ARRAY['paid','pending'], 'set_eq array');
@@ -1096,6 +1102,44 @@ SELECT skip('skipped on purpose', 1);
 
 SELECT finish();
 ";
+
+#[test]
+fn a_schema_left_by_the_pgtap_era_is_replaced_rather_than_refused() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // Exactly what a target tested by v0.2.0 carries: the reserved schema with
+    // the old marker table. Without recognising it, Zapadka would report a
+    // schema it had created itself as one it did not, and tell the operator to
+    // drop it -- an upgrade that blocks on a lie.
+    db.query(
+        "DROP SCHEMA IF EXISTS zapadka_test CASCADE;          CREATE SCHEMA zapadka_test;          CREATE TABLE zapadka_test.zapadka_pgtap (              singleton boolean PRIMARY KEY DEFAULT true,              pgtap_version text NOT NULL,              artifact_sha256 text NOT NULL,              zapadka_version text NOT NULL);          INSERT INTO zapadka_test.zapadka_pgtap (pgtap_version, artifact_sha256, zapadka_version)          VALUES ('1.3.4', repeat('a', 64), '0.2.0')",
+    );
+
+    project.test_file("orders.sql", "SELECT ok(true, 'runs after the upgrade');");
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_success();
+    assert!(
+        report
+            .diagnostic_codes()
+            .contains(&"test.library_installed"),
+        "the stale installation should be replaced: {:?}",
+        report.diagnostic_codes()
+    );
+    assert_eq!(
+        db.scalar("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace                    WHERE n.nspname = 'zapadka_test' AND c.relname = 'zapadka_pgtap'"),
+        "0",
+        "the old marker should be gone"
+    );
+}
 
 #[test]
 fn throws_ok_reads_a_five_byte_argument_as_a_sqlstate() {
