@@ -29,12 +29,20 @@ $$ LANGUAGE sql IMMUTABLE;
 -- disposes of everything: there is no run id to thread, nothing to clean up,
 -- and no way for one file's results to be visible to another.
 CREATE OR REPLACE FUNCTION _begin_run() RETURNS void AS $$
+DECLARE
+    leftover text;
 BEGIN
     -- Dropped first so a second run in one session -- someone stepping through
     -- files by hand in psql -- starts clean instead of failing on a name.
-    DROP TABLE IF EXISTS pg_temp.__zapadka_assertion;
-    DROP TABLE IF EXISTS pg_temp.__zapadka_note;
-    DROP TABLE IF EXISTS pg_temp.__zapadka_run;
+    -- Checked rather than `IF EXISTS`, which emits a NOTICE for every absent
+    -- table on the very first run.
+    FOR leftover IN
+        SELECT unnest(ARRAY['__zapadka_assertion', '__zapadka_note', '__zapadka_run'])
+    LOOP
+        IF to_regclass('pg_temp.' || quote_ident(leftover)) IS NOT NULL THEN
+            EXECUTE format('DROP TABLE pg_temp.%I', leftover);
+        END IF;
+    END LOOP;
 
     CREATE TEMP TABLE __zapadka_run (
         singleton        boolean PRIMARY KEY DEFAULT true CHECK (singleton),

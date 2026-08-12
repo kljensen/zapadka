@@ -914,6 +914,87 @@ fn a_test_file_cannot_leave_anything_behind() {
 }
 
 #[test]
+fn a_result_set_failure_reports_the_rows_and_their_types() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint, status text);\n\
+         INSERT INTO public.orders VALUES (1,'paid'),(2,'pending');",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    project.test_file(
+        "orders.sql",
+        "SELECT set_eq(\n\
+        \x20   'SELECT id, status FROM public.orders',\n\
+        \x20   $$VALUES (1::bigint,'paid'),(2::bigint,'shipped')$$,\n\
+        \x20   'orders have the expected statuses');",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_failed("verify.failed", exit::EXECUTION);
+
+    // pgTAP would render both sides with `record::text` and leave the reader to
+    // spot the difference. The structured detail names the rows and the types.
+    let diagnostics = &report.json["tests"][0]["assertions"][0]["diagnostics"];
+    assert_eq!(diagnostics["kind"], "set");
+    assert_eq!(diagnostics["missing_count"], "1");
+    assert_eq!(diagnostics["extra_count"], "1");
+    assert!(
+        diagnostics["missing"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("shipped"),
+        "the missing row should be named: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics["columns"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("bigint"),
+        "column types should be reported: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn a_test_file_may_return_whatever_it_likes() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // Under TAP every result row had to be exactly one text column, so this
+    // file could not run at all. The runner now ignores output entirely.
+    project.test_file(
+        "orders.sql",
+        "SELECT 1 AS a, 2 AS b, 3 AS c;\n\
+         CREATE TEMP TABLE scratch AS SELECT generate_series(1,3) AS n;\n\
+         SELECT n, n * 2 FROM scratch;\n\
+         SELECT is((SELECT count(*) FROM scratch), 3::bigint, 'scratch has three rows');",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_success();
+    assert_eq!(
+        report.json["tests"][0]["assertions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn a_plan_is_optional_but_a_wrong_one_fails() {
     let db = database();
     let project = project();
