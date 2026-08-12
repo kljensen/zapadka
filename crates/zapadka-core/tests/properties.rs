@@ -22,7 +22,6 @@ use zapadka_core::graph::Graph;
 use zapadka_core::manifest::Manifest;
 use zapadka_core::migration::{Migration, Script};
 use zapadka_core::report::ScriptRole;
-use zapadka_core::tap;
 
 /// Builds an id whose UUIDv7 ordering matches `n`.
 fn id(n: u8) -> Uuid {
@@ -91,54 +90,6 @@ fn acyclic_graph() -> impl Strategy<Value = Vec<(u8, Vec<u8>)>> {
 }
 
 proptest! {
-    /// The parser must always terminate with a classified answer.
-    ///
-    /// The TAP stream comes from a database. A panic here would take down a
-    /// migration tool because a test file printed something unexpected.
-    #[test]
-    fn the_tap_parser_never_panics_on_arbitrary_text(text in ".*") {
-        let _ = tap::parse(&text);
-    }
-
-    /// The same, on text shaped like TAP, which reaches deeper code paths than
-    /// arbitrary noise does.
-    #[test]
-    fn the_tap_parser_never_panics_on_tap_shaped_text(
-        lines in proptest::collection::vec(
-            prop_oneof![
-                Just("ok".to_owned()),
-                Just("not ok".to_owned()),
-                Just("---".to_owned()),
-                Just("...".to_owned()),
-                (0u64..5).prop_map(|n| format!("1..{n}")),
-                (0u64..5).prop_map(|n| format!("ok {n} - a description")),
-                (0u64..5).prop_map(|n| format!("not ok {n} # TODO later")),
-                "#.*".prop_map(|c| c.to_string()),
-                "[a-z]{1,8}: [a-z0-9]{1,8}".prop_map(|f| format!("    {f}")),
-            ],
-            0..24,
-        ),
-    ) {
-        let _ = tap::parse(&lines.join("\n"));
-    }
-
-    /// A parsed document's assertions are always numbered 1..n with no gaps.
-    ///
-    /// Everything downstream — the report, the human rendering, a future JUnit
-    /// renderer — assumes this, and the parser is what guarantees it.
-    #[test]
-    fn parsed_assertions_are_numbered_consecutively(count in 0usize..30) {
-        use std::fmt::Write as _;
-        let mut text = format!("1..{count}\n");
-        for number in 1..=count {
-            let _ = writeln!(text, "ok {number} - assertion {number}");
-        }
-        let document = tap::parse(&text).unwrap();
-        for (index, assertion) in document.assertions.iter().enumerate() {
-            prop_assert_eq!(assertion.number, index as u64 + 1);
-        }
-    }
-
     /// Deployment order always places a migration after everything it depends
     /// on. This is the whole promise of the graph.
     #[test]

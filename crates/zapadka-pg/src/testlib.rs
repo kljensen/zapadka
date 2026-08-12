@@ -1,15 +1,20 @@
-//! Installing the embedded pgTAP assertion library.
+//! Installing Zapadka's SQL assertion library.
 //!
-//! pgTAP ships inside the Zapadka binary and is installed into a reserved
-//! schema on a **test target only**. It is deliberately not installed as a
-//! PostgreSQL extension:
+//! The library ships inside the Zapadka binary and is installed into a reserved
+//! schema on a **test target only**. It is deliberately not a PostgreSQL
+//! extension:
 //!
 //! - An extension needs files on the server's filesystem and usually a package
 //!   install. Zapadka is one binary and can assume neither.
 //! - `CREATE EXTENSION` is a privileged, database-wide act. Creating a schema
 //!   is not, and it is trivially reversible with a single `DROP SCHEMA`.
-//! - This release of pgTAP contains no `LANGUAGE C` functions, so there is
-//!   nothing an extension would provide that a schema does not.
+//! - Nothing in the library is written in C, so an extension would provide
+//!   nothing a schema does not.
+//!
+//! The assertions carry pgTAP's names and argument types, because it is a good
+//! API that people already know. They are not pgTAP: they record typed rows and
+//! return booleans, and no TAP is produced anywhere. See
+//! `docs/adr/0006-own-a-native-sql-assertion-library.md`.
 //!
 //! Deploy targets never see any of this. That is the whole point of ADR-0004:
 //! production databases should not have to carry a test framework in order for
@@ -22,23 +27,32 @@ use zapadka_core::error::{Error, ErrorCode, Result};
 use crate::error::registry_failed;
 use crate::registry::quote_identifier;
 
-/// The schema pgTAP is installed into.
+/// The schema the assertion library is installed into.
 ///
 /// Reserved, and separate from the registry schema: dropping the test framework
 /// must never risk the migration history.
 pub const TEST_SCHEMA: &str = "zapadka_test";
 
-/// The pgTAP release embedded in this binary.
-pub const PGTAP_VERSION: &str = "1.3.4";
-
-/// The `major.minor` value `pgtap_version()` returns.
-const PGTAP_NUMERIC_VERSION: &str = "1.3";
-
-/// The vendored source, exactly as upstream ships it.
+/// The version of Zapadka's own assertion library.
 ///
-/// See `third_party/pgtap/PROVENANCE.toml`. `cargo xtask verify-fixtures`
-/// proves this file has not been edited.
-const PGTAP_SOURCE: &str = include_str!("../../../third_party/pgtap/sql/pgtap.sql.in");
+/// Reported to operators and recorded in the installed schema. Distinct from
+/// the capture protocol: the protocol changes when the *tables* change, this
+/// changes when the assertions do.
+pub const TEST_LIBRARY_VERSION: &str = "1";
+
+/// Zapadka's own assertion library.
+///
+/// See
+/// `docs/adr/0006-own-a-native-sql-assertion-library.md`.
+/// The library, in installation order: the core defines `_record`, which every
+/// assertion in the later files calls.
+const NATIVE_SOURCE: &[(&str, &str)] = &[
+    ("core", include_str!("../sql/core.sql")),
+    ("objects", include_str!("../sql/objects.sql")),
+    ("relations", include_str!("../sql/relations.sql")),
+    ("behaviour", include_str!("../sql/behaviour.sql")),
+    ("catalog", include_str!("../sql/catalog.sql")),
+];
 
 /// What is installed in a target's test schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,29 +65,12 @@ pub enum Installation {
     Stale {
         /// The artifact hash recorded on the target.
         installed_sha256: String,
-        /// The pgTAP release recorded on the target.
+        /// The library version recorded on the target.
         installed_version: String,
     },
 }
 
-/// Renders the SQL to install pgTAP.
-///
-/// Upstream's Makefile builds this by applying compatibility patches and
-/// substituting placeholders with `sed`. Every patch is gated on PostgreSQL
-/// 9.x, and Zapadka supports 18 only, so none apply; that leaves two
-/// substitutions, which are done here.
-///
-/// `os_name` comes from the *server*, not from the machine Zapadka is running
-/// on. Upstream uses the build host's `uname`, which would be wrong here:
-/// Zapadka commonly runs on one operating system and installs into a database
-/// on another, and `os_name()` is meant to describe where the tests run.
-pub fn artifact(os_name: &str) -> String {
-    PGTAP_SOURCE
-        .replace("__VERSION__", PGTAP_NUMERIC_VERSION)
-        .replace("__OS__", &escape_sql_literal(os_name))
-}
-
-/// The hash identifying this binary's pgTAP artifact.
+/// The hash identifying this binary's assertion library.
 ///
 /// Covers the vendored source and the substituted version, but not the
 /// server-dependent OS name — otherwise the same Zapadka build would appear to
@@ -82,10 +79,14 @@ pub fn artifact_sha256() -> String {
     use std::fmt::Write as _;
 
     let mut hasher = Sha256::new();
-    hasher.update(b"zapadka.pgtap.v1\n");
-    hasher.update(PGTAP_VERSION.as_bytes());
+    hasher.update(b"zapadka.testlib.v1\n");
+    hasher.update(crate::capture::PROTOCOL_VERSION.to_string().as_bytes());
     hasher.update(b"\n");
-    hasher.update(PGTAP_SOURCE.as_bytes());
+    for (part, sql) in NATIVE_SOURCE {
+        hasher.update(part.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(sql.as_bytes());
+    }
     let digest = hasher.finalize();
     digest
         .iter()
@@ -93,26 +94,6 @@ pub fn artifact_sha256() -> String {
             let _ = write!(out, "{byte:02x}");
             out
         })
-}
-
-/// Escapes a value being embedded in a single-quoted SQL literal.
-fn escape_sql_literal(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
-/// Derives the server's operating system from its own `version()` string.
-///
-/// PostgreSQL reports its build triple, for example
-/// `PostgreSQL 18.4 on aarch64-unknown-linux-musl, compiled by ...`. The third
-/// component of the triple is the OS.
-pub fn os_from_version(version: &str) -> String {
-    version
-        .split(" on ")
-        .nth(1)
-        .and_then(|rest| rest.split([',', ' ']).next())
-        .and_then(|triple| triple.split('-').nth(2))
-        .unwrap_or("unknown")
-        .to_owned()
 }
 
 /// Reads what is installed in the test schema.
@@ -131,9 +112,60 @@ pub async fn installed(client: &Client) -> Result<Installation> {
     }
 
     let quoted = quote_identifier(TEST_SCHEMA);
+
+    // A target tested by an earlier Zapadka carries `zapadka_pgtap` instead.
+    // Without recognising it, the schema would look like one Zapadka did not
+    // create and the operator would be told to drop something Zapadka had put
+    // there itself.
+    //
+    // The shape is checked, not just the name. Classifying as legacy leads to
+    // `DROP SCHEMA ... CASCADE`, so a bare name match would let any unrelated
+    // schema that happened to contain a `zapadka_pgtap` relation be destroyed.
+    // A table with these four columns and a singleton row is Zapadka's;
+    // anything else is somebody's data.
+    let legacy: bool = client
+        .query_one(
+            "SELECT EXISTS ( \
+               SELECT 1 FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                WHERE n.nspname = $1 \
+                  AND c.relname = 'zapadka_pgtap' \
+                  AND c.relkind = 'r' \
+                  AND (SELECT count(*) FROM pg_attribute a \
+                        WHERE a.attrelid = c.oid AND a.attnum > 0 \
+                          AND NOT a.attisdropped \
+                          AND a.attname IN ('singleton', 'pgtap_version', \
+                                            'artifact_sha256', 'zapadka_version')) = 4)",
+            &[&TEST_SCHEMA],
+        )
+        .await
+        .map_err(|error| registry_failed(error, "look for a previous installation"))?
+        .get(0);
+
+    // And it must actually hold the marker row. A table of the right shape but
+    // no singleton row was not written by Zapadka's installer.
+    let legacy = legacy
+        && client
+            .query_one(
+                &format!(
+                    "SELECT count(*) = 1 FROM {}.zapadka_pgtap WHERE singleton",
+                    quote_identifier(TEST_SCHEMA)
+                ),
+                &[],
+            )
+            .await
+            .map_err(|error| registry_failed(error, "read the previous installation marker"))?
+            .get::<_, bool>(0);
+    if legacy {
+        return Ok(Installation::Stale {
+            installed_version: "pgTAP".to_owned(),
+            installed_sha256: String::new(),
+        });
+    }
+
     let marker = match client
         .query_opt(
-            &format!("SELECT artifact_sha256, pgtap_version FROM {quoted}.zapadka_pgtap"),
+            &format!("SELECT artifact_sha256, library_version FROM {quoted}.zapadka_testlib"),
             &[],
         )
         .await
@@ -152,7 +184,7 @@ pub async fn installed(client: &Client) -> Result<Installation> {
             None
         }
         Err(error) => {
-            return Err(registry_failed(error, "read the pgTAP installation marker"));
+            return Err(registry_failed(error, "read the installation marker"));
         }
     };
 
@@ -186,9 +218,8 @@ pub async fn installed(client: &Client) -> Result<Installation> {
 ///
 /// The whole install runs in one transaction: a half-installed assertion
 /// library would produce test failures that look like application bugs.
-pub async fn install(client: &mut Client, server_version: &str) -> Result<String> {
+pub async fn install(client: &mut Client, _server_version: &str) -> Result<String> {
     let quoted = quote_identifier(TEST_SCHEMA);
-    let os = os_from_version(server_version);
     let sha256 = artifact_sha256();
 
     let transaction = client
@@ -204,7 +235,8 @@ pub async fn install(client: &mut Client, server_version: &str) -> Result<String
             "DROP SCHEMA IF EXISTS {quoted} CASCADE;\n\
              CREATE SCHEMA {quoted};\n\
              COMMENT ON SCHEMA {quoted} IS \
-             'pgTAP {PGTAP_VERSION}, installed by Zapadka. Safe to drop; contains no application data.';"
+             'Zapadka test assertions {TEST_LIBRARY_VERSION}, installed by Zapadka. Safe to \
+              drop; contains no application data.';"
         ))
         .await
         .map_err(|error| registry_failed(error, "create the test schema"))?;
@@ -216,16 +248,20 @@ pub async fn install(client: &mut Client, server_version: &str) -> Result<String
         .await
         .map_err(|error| registry_failed(error, "set the install search path"))?;
 
-    transaction
-        .batch_execute(&artifact(&os))
-        .await
-        .map_err(|error| registry_failed(error, "install pgTAP"))?;
+    for (part, sql) in NATIVE_SOURCE {
+        transaction.batch_execute(sql).await.map_err(|error| {
+            registry_failed(
+                error,
+                &format!("install the test assertion library ({part})"),
+            )
+        })?;
+    }
 
     transaction
         .batch_execute(&format!(
-            "CREATE TABLE {quoted}.zapadka_pgtap (\n\
+            "CREATE TABLE {quoted}.zapadka_testlib (\n\
                  singleton        boolean     PRIMARY KEY DEFAULT true CHECK (singleton),\n\
-                 pgtap_version    text        NOT NULL,\n\
+                 library_version    text        NOT NULL,\n\
                  artifact_sha256  text        NOT NULL,\n\
                  zapadka_version  text        NOT NULL,\n\
                  installed_at     timestamptz NOT NULL DEFAULT now()\n\
@@ -237,10 +273,10 @@ pub async fn install(client: &mut Client, server_version: &str) -> Result<String
     transaction
         .execute(
             &format!(
-                "INSERT INTO {quoted}.zapadka_pgtap \
-                    (pgtap_version, artifact_sha256, zapadka_version) VALUES ($1, $2, $3)"
+                "INSERT INTO {quoted}.zapadka_testlib \
+                    (library_version, artifact_sha256, zapadka_version) VALUES ($1, $2, $3)"
             ),
-            &[&PGTAP_VERSION, &sha256, &env!("CARGO_PKG_VERSION")],
+            &[&TEST_LIBRARY_VERSION, &sha256, &env!("CARGO_PKG_VERSION")],
         )
         .await
         .map_err(|error| registry_failed(error, "record the pgTAP installation"))?;
@@ -282,28 +318,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_artifact_substitutes_both_placeholders() {
-        let sql = artifact("linux");
-        assert!(!sql.contains("__VERSION__"), "version placeholder remained");
-        assert!(!sql.contains("__OS__"), "os placeholder remained");
-        assert!(
-            sql.contains("SELECT 1.3;"),
-            "pgtap_version() should return 1.3"
-        );
-        assert!(
-            sql.contains("''linux''::text"),
-            "os_name() should return the OS"
-        );
-    }
-
-    #[test]
-    fn the_vendored_source_needs_no_extension_or_shared_library() {
-        // This is what lets Zapadka install pgTAP into a plain schema. If a
-        // future release adds either, the install strategy has to change.
-        assert!(!PGTAP_SOURCE.contains("@extschema@"));
-        assert!(!PGTAP_SOURCE.contains("CREATE EXTENSION"));
-        assert!(!PGTAP_SOURCE.contains("LANGUAGE C"));
-        assert!(!PGTAP_SOURCE.contains("MODULE_PATHNAME"));
+    fn the_library_installs_into_a_plain_schema() {
+        // Nothing here may need an extension or a shared library: the whole
+        // point is that a test target needs no server-side installation.
+        for (part, sql) in NATIVE_SOURCE {
+            assert!(!sql.contains("CREATE EXTENSION"), "{part}");
+            assert!(!sql.contains("LANGUAGE C"), "{part}");
+            assert!(!sql.contains("MODULE_PATHNAME"), "{part}");
+        }
     }
 
     #[test]
@@ -312,36 +334,6 @@ mod tests {
         // have different Zapadka builds installed.
         assert_eq!(artifact_sha256(), artifact_sha256());
         assert_eq!(artifact_sha256().len(), 64);
-        assert_ne!(artifact("linux"), artifact("darwin"));
-    }
-
-    #[test]
-    fn the_operating_system_comes_from_the_servers_own_version_string() {
-        for (version, expected) in [
-            (
-                "PostgreSQL 18.4 on aarch64-unknown-linux-musl, compiled by gcc",
-                "linux",
-            ),
-            (
-                "PostgreSQL 18.4 on x86_64-pc-linux-gnu, compiled by gcc 13.2",
-                "linux",
-            ),
-            (
-                "PostgreSQL 18.4 on aarch64-apple-darwin23.0.0, compiled by clang",
-                "darwin23.0.0",
-            ),
-        ] {
-            assert_eq!(os_from_version(version), expected, "{version}");
-        }
-        // An unrecognizable version string is reported as unknown rather than
-        // guessed at.
-        assert_eq!(os_from_version("something else entirely"), "unknown");
-    }
-
-    #[test]
-    fn a_quote_in_the_os_name_cannot_escape_its_literal() {
-        let sql = artifact("weird'; DROP TABLE x; --");
-        assert!(sql.contains("weird''; DROP TABLE x; --"));
     }
 
     #[test]

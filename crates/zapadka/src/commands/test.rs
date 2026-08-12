@@ -18,20 +18,20 @@
 //!
 //! # Why the whole suite holds the deployment lock
 //!
-//! A suite is not read-only: it installs pgTAP, and it restores sequence
+//! A suite is not read-only: it installs the assertion library, and it restores sequence
 //! positions after each file. Two suites overlapping on one target would race
 //! on both — and each one's sequence restoration would undo the other's. A
 //! suite overlapping a deploy would run against a schema changing underneath
-//! it. So the lock is held from before the pgTAP install until after the last
+//! it. So the lock is held from before that install until after the last
 //! file, and every per-file connection runs inside it.
 
 use zapadka_core::config::LoadedConfig;
 use zapadka_core::error::{Error, ErrorCode, Result};
 use zapadka_core::graph::Graph;
 use zapadka_core::report::{Assertion, AssertionStatus, Status, TestFile as TestFileReport};
-use zapadka_core::tap::{Outcome, Plan};
+use zapadka_core::testresult::Directive;
 use zapadka_core::testsuite;
-use zapadka_pg::{history, lock, pgtap, testrun};
+use zapadka_pg::{history, lock, testlib, testrun};
 
 use crate::cli::TestArgs;
 use crate::commands::target;
@@ -80,7 +80,7 @@ pub async fn run(
     let timeouts = opened.timeouts;
     let mut client = opened.connection.client;
 
-    // Taken before the pgTAP install and held until the last file has run.
+    // Taken before the library install and held until the last file has run.
     let held = lock::acquire(
         &client,
         config.config.project.id,
@@ -147,7 +147,7 @@ async fn run_suite(
         ));
     }
 
-    ensure_pgtap(client, server_version, session).await?;
+    ensure_library(client, server_version, session).await?;
 
     let mut failures = 0usize;
     for file in selected {
@@ -200,38 +200,85 @@ async fn run_suite(
     ))
 }
 
-/// Installs pgTAP when it is absent or stale.
-async fn ensure_pgtap(
+/// Installs the assertion library when it is absent or stale.
+async fn ensure_library(
     client: &mut zapadka_pg::Client,
     server_version: &str,
     session: &mut Session,
 ) -> Result<()> {
-    let installed = pgtap::installed(client).await?;
+    let installed = testlib::installed(client).await?;
     let reason = match &installed {
-        pgtap::Installation::Current => return Ok(()),
-        pgtap::Installation::Absent => "it was not installed".to_owned(),
-        pgtap::Installation::Stale {
+        testlib::Installation::Current => return Ok(()),
+        testlib::Installation::Absent => "it was not installed".to_owned(),
+        testlib::Installation::Stale {
             installed_version, ..
-        } => format!("the installed artifact is pgTAP {installed_version}"),
+        } => format!("the installed library is version {installed_version}"),
     };
 
-    pgtap::install(client, server_version).await?;
+    testlib::install(client, server_version).await?;
     session.diagnose(zapadka_core::report::Diagnostic {
         severity: zapadka_core::report::Severity::Note,
-        code: "test.pgtap_installed".to_owned(),
+        code: "test.library_installed".to_owned(),
         message: format!(
-            "installed pgTAP {} into {} because {reason}",
-            pgtap::PGTAP_VERSION,
-            pgtap::TEST_SCHEMA
+            "installed Zapadka's test assertions ({}) into {} because {reason}",
+            testlib::TEST_LIBRARY_VERSION,
+            testlib::TEST_SCHEMA
         ),
         migration_id: None,
         location: None,
         hint: Some(format!(
             "{} holds no application data and is safe to drop",
-            pgtap::TEST_SCHEMA
+            testlib::TEST_SCHEMA
         )),
     });
     Ok(())
+}
+
+/// The public status of an assertion.
+///
+/// Derived from the recorded outcome and directive rather than read from a
+/// column, because the two facts compose: a failure under TODO is expected, and
+/// a pass under TODO is worth flagging as a fixed thing nobody removed the
+/// directive from.
+fn status_of(assertion: &zapadka_core::testresult::Assertion) -> AssertionStatus {
+    match (&assertion.directive, assertion.passed) {
+        (None, true) => AssertionStatus::Passed,
+        (None, false) => AssertionStatus::Failed,
+        (Some(Directive::Todo(_)), true) => AssertionStatus::TodoPassed,
+        (Some(Directive::Todo(_)), false) => AssertionStatus::TodoFailed,
+        (Some(Directive::Skip(_)), _) => AssertionStatus::Skipped,
+    }
+}
+
+/// Projects an assertion's typed detail into the report's diagnostic map.
+///
+/// `ReportV1` promises `diagnostics` as a string map, and consumers already
+/// read `have` and `want` from it, so the structured detail is flattened here
+/// rather than changing a published contract. A value that carries a `display`
+/// form contributes that form, because it is what PostgreSQL would print;
+/// anything else contributes its JSON rendering.
+fn diagnostics_of(
+    assertion: &zapadka_core::testresult::Assertion,
+) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    let Some(serde_json::Value::Object(detail)) = &assertion.detail else {
+        return map;
+    };
+    for (key, value) in detail {
+        let rendered = match value {
+            serde_json::Value::Object(fields) => match fields.get("display") {
+                Some(serde_json::Value::String(display)) => display.clone(),
+                // A described value whose display is SQL NULL. `null` is what
+                // psql shows, and calling it an empty string would be a lie.
+                Some(serde_json::Value::Null) => "NULL".to_owned(),
+                _ => value.to_string(),
+            },
+            serde_json::Value::String(text) => text.clone(),
+            other => other.to_string(),
+        };
+        map.insert(key.clone(), rendered);
+    }
+    map
 }
 
 /// Converts a file's outcome into its report entry.
@@ -244,17 +291,16 @@ fn to_report(file: &testsuite::TestFile, outcome: &testrun::TestOutcome) -> Test
                 .assertions
                 .iter()
                 .map(|assertion| Assertion {
-                    number: assertion.number,
+                    number: u64::from(assertion.number),
                     description: assertion.description.clone(),
-                    status: match assertion.outcome {
-                        Outcome::Passed => AssertionStatus::Passed,
-                        Outcome::Failed => AssertionStatus::Failed,
-                        Outcome::TodoFailed => AssertionStatus::TodoFailed,
-                        Outcome::TodoPassed => AssertionStatus::TodoPassed,
-                        Outcome::Skipped => AssertionStatus::Skipped,
+                    status: status_of(assertion),
+                    directive_reason: match &assertion.directive {
+                        Some(Directive::Todo(reason) | Directive::Skip(reason)) => {
+                            Some(reason.clone())
+                        }
+                        None => None,
                     },
-                    directive_reason: assertion.directive_reason.clone(),
-                    diagnostics: assertion.diagnostics.clone(),
+                    diagnostics: diagnostics_of(assertion),
                 })
                 .collect()
         })
@@ -263,10 +309,23 @@ fn to_report(file: &testsuite::TestFile, outcome: &testrun::TestOutcome) -> Test
     let planned = outcome
         .document
         .as_ref()
-        .and_then(|document| match document.plan {
-            Plan::Count(count) => Some(count),
-            Plan::SkipAll(_) => None,
-        });
+        .and_then(zapadka_core::testresult::TestDocument::planned)
+        .map(u64::from);
+
+    let notes = outcome
+        .document
+        .as_ref()
+        .map(|document| {
+            document
+                .notes
+                .iter()
+                .map(|note| zapadka_core::report::TestNote {
+                    after_assertion: note.after_assertion.map(u64::from),
+                    message: note.message.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     TestFileReport {
         path: file.relative_path.clone(),
@@ -280,6 +339,7 @@ fn to_report(file: &testsuite::TestFile, outcome: &testrun::TestOutcome) -> Test
         planned,
         duration_ms: Some(outcome.duration_ms),
         error: outcome.error.as_ref().map(Into::into),
+        notes,
     }
 }
 
@@ -289,7 +349,8 @@ mod tests {
     #![allow(clippy::panic)]
 
     use super::*;
-    use zapadka_core::tap;
+    use serde_json::json;
+    use zapadka_core::testresult::{PlanDeclaration, TestDocument};
 
     fn file() -> testsuite::TestFile {
         testsuite::TestFile {
@@ -300,9 +361,26 @@ mod tests {
         }
     }
 
-    fn outcome(text: &str) -> testrun::TestOutcome {
+    fn recorded(
+        number: u32,
+        passed: bool,
+        description: &str,
+        directive: Option<Directive>,
+        detail: Option<serde_json::Value>,
+    ) -> zapadka_core::testresult::Assertion {
+        zapadka_core::testresult::Assertion {
+            number,
+            kind: "is".to_owned(),
+            passed,
+            description: Some(description.to_owned()),
+            directive,
+            detail,
+        }
+    }
+
+    fn outcome(document: TestDocument) -> testrun::TestOutcome {
         testrun::TestOutcome {
-            document: Some(tap::parse(text).unwrap()),
+            document: Some(document),
             error: None,
             advanced_sequences: Vec::new(),
             duration_ms: 7,
@@ -311,7 +389,18 @@ mod tests {
 
     #[test]
     fn a_passing_file_reports_every_assertion() {
-        let report = to_report(&file(), &outcome("1..2\nok 1 - one\nok 2 - two\n"));
+        let report = to_report(
+            &file(),
+            &outcome(TestDocument {
+                plan: Some(PlanDeclaration::Count(2)),
+                finished: true,
+                assertions: vec![
+                    recorded(1, true, "one", None, None),
+                    recorded(2, true, "two", None, None),
+                ],
+                notes: Vec::new(),
+            }),
+        );
         assert_eq!(report.status, Status::Succeeded);
         assert_eq!(report.planned, Some(2));
         assert_eq!(report.assertions.len(), 2);
@@ -320,19 +409,50 @@ mod tests {
     }
 
     #[test]
-    fn a_failing_file_carries_the_failing_assertions_diagnostics() {
+    fn a_failing_assertions_typed_detail_becomes_report_diagnostics() {
+        // `ReportV1` promises a string map and consumers already read `have`
+        // and `want`, so the structured detail is projected into it rather than
+        // changing a published contract.
+        let detail = json!({
+            "comparison": "is",
+            "have": {"json": 41, "display": "41", "type": "integer", "is_null": false},
+            "want": {"json": 42, "display": "42", "type": "integer", "is_null": false}
+        });
         let report = to_report(
             &file(),
-            &outcome("1..1\nnot ok 1 - totals match\n---\nhave: 41\nwant: 42\n...\n"),
+            &outcome(TestDocument {
+                assertions: vec![recorded(1, false, "totals match", None, Some(detail))],
+                ..TestDocument::default()
+            }),
         );
         assert_eq!(report.status, Status::Failed);
         assert_eq!(report.assertions[0].status, AssertionStatus::Failed);
         assert_eq!(report.assertions[0].diagnostics["have"], "41");
+        assert_eq!(report.assertions[0].diagnostics["want"], "42");
+        assert_eq!(report.assertions[0].diagnostics["comparison"], "is");
     }
 
     #[test]
-    fn a_file_that_skipped_everything_passes_and_reports_no_plan_count() {
-        let report = to_report(&file(), &outcome("1..0 # SKIP not applicable here\n"));
+    fn a_null_operand_reads_as_null_rather_than_empty() {
+        // The classic place a text format lies: SQL NULL and the empty string
+        // are not the same value, and a report that renders both as "" cannot
+        // be used to tell them apart.
+        let detail = json!({
+            "have": {"json": null, "display": null, "type": "text", "is_null": true}
+        });
+        let report = to_report(
+            &file(),
+            &outcome(TestDocument {
+                assertions: vec![recorded(1, false, "x", None, Some(detail))],
+                ..TestDocument::default()
+            }),
+        );
+        assert_eq!(report.assertions[0].diagnostics["have"], "NULL");
+    }
+
+    #[test]
+    fn a_file_that_planned_nothing_reports_no_count() {
+        let report = to_report(&file(), &outcome(TestDocument::default()));
         assert_eq!(report.status, Status::Succeeded);
         assert_eq!(report.planned, None);
         assert!(report.assertions.is_empty());
@@ -362,7 +482,25 @@ mod tests {
     fn todo_and_skip_directives_survive_into_the_report() {
         let report = to_report(
             &file(),
-            &outcome("1..2\nnot ok 1 - later # TODO next sprint\nok 2 - x # SKIP no data\n"),
+            &outcome(TestDocument {
+                assertions: vec![
+                    recorded(
+                        1,
+                        false,
+                        "later",
+                        Some(Directive::Todo("next sprint".to_owned())),
+                        None,
+                    ),
+                    recorded(
+                        2,
+                        true,
+                        "x",
+                        Some(Directive::Skip("no data".to_owned())),
+                        None,
+                    ),
+                ],
+                ..TestDocument::default()
+            }),
         );
         assert_eq!(report.status, Status::Succeeded, "neither fails the file");
         assert_eq!(report.assertions[0].status, AssertionStatus::TodoFailed);
@@ -371,5 +509,26 @@ mod tests {
             Some("next sprint")
         );
         assert_eq!(report.assertions[1].status, AssertionStatus::Skipped);
+    }
+
+    #[test]
+    fn a_todo_that_unexpectedly_passed_is_flagged() {
+        // Worth surfacing: it usually means the thing was fixed and nobody
+        // removed the directive, so the assertion is no longer protecting
+        // anything.
+        let report = to_report(
+            &file(),
+            &outcome(TestDocument {
+                assertions: vec![recorded(
+                    1,
+                    true,
+                    "fixed",
+                    Some(Directive::Todo("later".to_owned())),
+                    None,
+                )],
+                ..TestDocument::default()
+            }),
+        );
+        assert_eq!(report.assertions[0].status, AssertionStatus::TodoPassed);
     }
 }

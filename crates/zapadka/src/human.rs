@@ -214,6 +214,38 @@ fn write_test_file(test: &TestFile, out: &mut impl Write) -> std::io::Result<()>
         for (key, value) in &assertion.diagnostics {
             writeln!(out, "      {key}: {value}")?;
         }
+        // A note written right after an assertion is nearly always context for
+        // it, so it belongs next to it rather than in a block further down.
+        for note in test
+            .notes
+            .iter()
+            .filter(|note| note.after_assertion == Some(assertion.number))
+        {
+            writeln!(out, "      note: {}", note.message)?;
+        }
+    }
+
+    // Everything else: notes written before any assertion, and notes that
+    // followed an assertion which passed and so was not printed above. Both
+    // would otherwise sit in the JSON and be invisible to a person, which is
+    // the worst place for the two renderings to disagree.
+    let shown: Vec<u64> = test
+        .assertions
+        .iter()
+        .filter(|assertion| {
+            matches!(
+                assertion.status,
+                AssertionStatus::Failed | AssertionStatus::TodoFailed
+            )
+        })
+        .map(|assertion| assertion.number)
+        .collect();
+    for note in test
+        .notes
+        .iter()
+        .filter(|note| note.after_assertion.is_none_or(|n| !shown.contains(&n)))
+    {
+        writeln!(out, "    note: {}", note.message)?;
     }
     Ok(())
 }

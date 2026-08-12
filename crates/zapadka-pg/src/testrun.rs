@@ -30,21 +30,21 @@
 
 use std::time::Instant;
 
-use tokio_postgres::{Client, SimpleQueryMessage};
+use tokio_postgres::Client;
 use zapadka_core::error::{Error, ErrorCode, Result};
 use zapadka_core::report::Location;
-use zapadka_core::tap::{self, TapDocument};
+use zapadka_core::testresult::TestDocument;
 use zapadka_core::testsuite::TestFile;
 
 use crate::error::registry_failed;
 use crate::execute::Timeouts;
-use crate::pgtap;
+use crate::testlib;
 
 /// What one test file did.
 #[derive(Debug)]
 pub struct TestOutcome {
-    /// The parsed TAP, when the file produced any Zapadka could read.
-    pub document: Option<TapDocument>,
+    /// What the file recorded, when it ran to completion.
+    pub document: Option<TestDocument>,
     /// Why the file failed, when it did.
     pub error: Option<Error>,
     /// Sequences the file advanced, which rollback does not undo.
@@ -56,7 +56,7 @@ pub struct TestOutcome {
 impl TestOutcome {
     /// Whether the file passed.
     pub fn passed(&self) -> bool {
-        self.error.is_none() && self.document.as_ref().is_some_and(TapDocument::passed)
+        self.error.is_none() && self.document.as_ref().is_some_and(TestDocument::passed)
     }
 }
 
@@ -98,7 +98,7 @@ async fn run_inner(
     application_schemas: &[String],
     timeouts: Timeouts,
     advanced: &mut Vec<AdvancedSequence>,
-) -> Result<TapDocument> {
+) -> Result<TestDocument> {
     // A test file that commits would escape the rollback: the whole file is
     // sent as one simple query, so statements after a `COMMIT` run outside the
     // transaction and survive it. That would silently break the isolation the
@@ -123,15 +123,29 @@ async fn run_inner(
     transaction
         .batch_execute(&format!(
             "SET LOCAL search_path = {};",
-            pgtap::test_search_path(application_schemas)
+            testlib::test_search_path(application_schemas)
         ))
         .await
         .map_err(|error| registry_failed(error, "set the test search path"))?;
 
-    // The whole file goes to the server as one simple query, exactly as a
-    // migration does, so pgTAP's results come back as a sequence of result
-    // sets in the order the file produced them.
-    let outcome = transaction.simple_query(&file.sql).await;
+    // Prepared before the file runs, so the assertions have somewhere to
+    // record themselves.
+    crate::capture::begin(&transaction).await?;
+
+    // `batch_execute` rather than `simple_query`: the file's result sets are no
+    // longer the test protocol, so whatever it returns is its own business. A
+    // test may now contain an ordinary two-column SELECT, which the TAP-era
+    // runner rejected outright.
+    let outcome = transaction.batch_execute(&file.sql).await;
+
+    // Read before the rollback, because the capture tables are ON COMMIT DROP
+    // and share this transaction. Only when the file succeeded: a SQL error
+    // leaves the transaction aborted, and every query against it would fail
+    // with the abort rather than the original problem.
+    let captured = match &outcome {
+        Ok(()) => Some(crate::capture::read(&transaction).await),
+        Err(_) => None,
+    };
 
     // Rolled back on every path, whether the file passed, failed, or errored. A
     // test that could leave data behind could make the next one pass.
@@ -142,20 +156,21 @@ async fn run_inner(
 
     advanced.extend(sequences_advanced(client, &sequences).await?);
 
-    let messages = outcome.map_err(|error| sql_error(&error, file))?;
-    let tap = collect_tap(&messages, file)?;
+    outcome.map_err(|error| sql_error(&error, file))?;
+    let document = captured.expect("a successful run always reads its results")?;
 
-    tap::parse(&tap).map_err(|error| {
+    // The columns cannot misreport an outcome, but a gap between what the
+    // library recorded and what arrived here would mean results were lost --
+    // and a lost failure reads as success.
+    document.validate().map_err(|problem| {
         Error::new(
             ErrorCode::VerifyFailed,
-            format!("{}: {error}", file.relative_path),
+            format!("{}: {problem}", file.relative_path),
         )
         .at(Location::file(&file.relative_path))
-        .with_hint(
-            "a test file must call plan(...) or no_plan() and finish(), and must emit nothing \
-             but pgTAP results",
-        )
-    })
+    })?;
+
+    Ok(document)
 }
 
 /// One sequence's position.
@@ -200,7 +215,7 @@ async fn snapshot_sequences(client: &Client) -> Result<Vec<SequenceState>> {
                AND has_sequence_privilege( \
                      format('%I.%I', schemaname, sequencename), 'USAGE,UPDATE') \
              ORDER BY 1",
-            &[&pgtap::TEST_SCHEMA],
+            &[&testlib::TEST_SCHEMA],
         )
         .await
         .map_err(|error| registry_failed(error, "list sequences"))?;
@@ -285,126 +300,63 @@ fn sql_error(error: &tokio_postgres::Error, file: &TestFile) -> Error {
     zapadka
 }
 
-/// Extracts the TAP stream from a file's result sets.
-///
-/// pgTAP emits TAP as rows of a single text column. Zapadka accepts exactly
-/// that shape and refuses anything else: a result set with two columns, or one
-/// that is not text, means the file did something other than call pgTAP, and
-/// guessing which column was meant to be the output would be how a broken test
-/// gets reported as passing.
-///
-/// Statements that produce no rows at all — `SET`, `CREATE TABLE`, an `INSERT`
-/// used to set up a fixture — are ignored, because a test file legitimately
-/// contains them.
-fn collect_tap(messages: &[SimpleQueryMessage], file: &TestFile) -> Result<String> {
-    let mut lines = Vec::new();
-    let mut columns: Option<usize> = None;
-
-    for message in messages {
-        match message {
-            SimpleQueryMessage::RowDescription(description) => {
-                columns = Some(description.len());
-            }
-            SimpleQueryMessage::Row(row) => {
-                let width = columns.unwrap_or_else(|| row.columns().len());
-                if width != 1 {
-                    return Err(protocol_error(
-                        file,
-                        &format!("a result with {width} columns"),
-                    ));
-                }
-                match row.get(0) {
-                    Some(value) => lines.push(value.to_owned()),
-                    // A NULL cannot be a TAP line, and treating it as a blank
-                    // one would silently drop whatever the file meant to say.
-                    None => return Err(protocol_error(file, "a NULL result")),
-                }
-            }
-            // A command that returned no rows.
-            _ => {}
-        }
-    }
-
-    Ok(lines.join("\n"))
-}
-
-/// The error for output Zapadka cannot interpret as TAP.
-fn protocol_error(file: &TestFile, what: &str) -> Error {
-    Error::new(
-        ErrorCode::VerifyFailed,
-        format!(
-            "{} produced {what}, which is not pgTAP output",
-            file.relative_path
-        ),
-    )
-    .at(Location::file(&file.relative_path))
-    .with_hint(
-        "a test file should emit only pgTAP results; wrap other queries so they return no rows, \
-         or move them into a fixture",
-    )
-}
-
 #[cfg(test)]
 mod tests {
     // Assertions and unreachable branches in tests panic by design.
     #![allow(clippy::panic)]
 
     use super::*;
-    use zapadka_core::tap::Outcome;
+    use zapadka_core::testresult::{Assertion, Directive};
 
-    fn file() -> TestFile {
-        TestFile {
-            path: camino::Utf8PathBuf::from("tests/db/orders.sql"),
-            relative_path: "tests/db/orders.sql".to_owned(),
-            sql: String::new(),
-            sha256: "0".repeat(64),
+    fn assertion(number: u32, passed: bool, directive: Option<Directive>) -> Assertion {
+        Assertion {
+            number,
+            kind: "is".to_owned(),
+            passed,
+            description: None,
+            directive,
+            detail: None,
+        }
+    }
+
+    fn outcome(document: Option<TestDocument>, error: Option<Error>) -> TestOutcome {
+        TestOutcome {
+            document,
+            error,
+            advanced_sequences: Vec::new(),
+            duration_ms: 1,
         }
     }
 
     #[test]
     fn an_outcome_with_a_failure_did_not_pass() {
-        let document = tap::parse("1..2\nok 1 - fine\nnot ok 2 - broken\n").unwrap();
-        let outcome = TestOutcome {
-            document: Some(document),
-            error: None,
-            advanced_sequences: Vec::new(),
-            duration_ms: 1,
+        let document = TestDocument {
+            assertions: vec![assertion(1, true, None), assertion(2, false, None)],
+            ..TestDocument::default()
         };
-        assert!(!outcome.passed());
+        assert!(!outcome(Some(document), None).passed());
     }
 
     #[test]
     fn an_outcome_with_only_todo_failures_passed() {
-        let document = tap::parse("1..1\nnot ok 1 - later # TODO\n").unwrap();
-        let outcome = TestOutcome {
-            document: Some(document),
-            error: None,
-            advanced_sequences: Vec::new(),
-            duration_ms: 1,
+        let document = TestDocument {
+            assertions: vec![assertion(1, false, Some(Directive::Todo("later".into())))],
+            ..TestDocument::default()
         };
-        assert!(outcome.passed());
-        assert_eq!(
-            outcome.document.unwrap().assertions[0].outcome,
-            Outcome::TodoFailed
-        );
+        assert!(outcome(Some(document), None).passed());
     }
 
     #[test]
-    fn a_file_that_errored_did_not_pass_even_with_no_tap() {
-        let outcome = TestOutcome {
-            document: None,
-            error: Some(Error::new(ErrorCode::VerifyFailed, "boom")),
-            advanced_sequences: Vec::new(),
-            duration_ms: 1,
-        };
-        assert!(!outcome.passed());
+    fn a_file_that_errored_did_not_pass_even_with_no_results() {
+        let failed = outcome(None, Some(Error::new(ErrorCode::VerifyFailed, "boom")));
+        assert!(!failed.passed());
     }
 
     #[test]
-    fn unreadable_output_names_the_file_and_says_what_to_do() {
-        let error = protocol_error(&file(), "a result with 3 columns");
-        assert_eq!(error.code, ErrorCode::VerifyFailed);
-        assert_eq!(error.location().unwrap().path, "tests/db/orders.sql");
-        assert!(error.hint().unwrap().contains("only pgTAP results"));
+    fn a_file_that_recorded_nothing_passed() {
+        // Zero assertions is a real answer, not a failure: a file may set up
+        // fixtures and assert nothing yet. The old parser could not say this
+        // without a plan line to read.
+        assert!(outcome(Some(TestDocument::default()), None).passed());
     }
 }

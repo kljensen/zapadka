@@ -575,7 +575,7 @@
           "minimum": 0
         },
         "error": {
-          "description": "Why the file failed as a whole, e.g. a SQL error or malformed TAP.",
+          "description": "Why the file failed as a whole, e.g. a SQL error.",
           "anyOf": [
             {
               "$ref": "#/$defs/ReportError"
@@ -584,6 +584,13 @@
               "type": "null"
             }
           ]
+        },
+        "notes": {
+          "description": "Notes the file wrote with `diag()`, in order.\n\nKept at file level rather than folded into assertions because a note\nwritten before the first assertion belongs to no assertion, and\nattaching it to one anyway would misreport where it came from.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TestNote"
+          }
         }
       },
       "required": [
@@ -661,6 +668,28 @@
           "type": "string",
           "const": "skipped"
         }
+      ]
+    },
+    "TestNote": {
+      "description": "A note a test file wrote with `diag()`.",
+      "type": "object",
+      "properties": {
+        "after_assertion": {
+          "description": "The assertion this note followed, when it followed one.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "message": {
+          "description": "What the file said.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
       ]
     },
     "Diagnostic": {

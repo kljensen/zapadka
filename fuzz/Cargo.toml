@@ -16,13 +16,6 @@ libfuzzer-sys = "0.4"
 zapadka-core = { path = "../crates/zapadka-core" }
 
 [[bin]]
-name = "tap"
-path = "fuzz_targets/tap.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "config"
 path = "fuzz_targets/config.rs"
 test = false

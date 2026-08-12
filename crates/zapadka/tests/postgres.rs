@@ -842,7 +842,7 @@ fn runs_database_tests_against_a_prepared_target() {
         db.scalar("SELECT count(*) FROM pg_extension WHERE extname = 'pgtap'"),
         "0"
     );
-    assert_eq!(db.scalar("SELECT zapadka_test.pgtap_version()"), "1.3");
+    assert_eq!(db.scalar("SELECT zapadka_test.zapadka_test_version()"), "1");
 }
 
 #[test]
@@ -914,7 +914,199 @@ fn a_test_file_cannot_leave_anything_behind() {
 }
 
 #[test]
-fn a_test_file_with_no_plan_is_a_failure_not_a_pass() {
+fn exception_privilege_and_type_assertions_work_and_report_structurally() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint PRIMARY KEY, status text);\n\
+         INSERT INTO public.orders VALUES (1,'paid');\n\
+         CREATE TYPE public.mood AS ENUM ('sad','ok','happy');",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // Everything here runs inside the runner's transaction and is rolled back,
+    // including the role.
+    project.test_file(
+        "checks.sql",
+        "CREATE ROLE reader;\n\
+         GRANT SELECT ON public.orders TO reader;\n\
+         SELECT throws_ok($$INSERT INTO public.orders VALUES (1,'dup')$$, '23505', \n\
+        \x20              NULL::text, 'a duplicate key is rejected');\n\
+         SELECT throws_like($$SELECT * FROM public.nope$$, '%does not exist%', \n\
+        \x20              'a missing relation is named');\n\
+         SELECT lives_ok($$SELECT 1$$, 'a trivial query lives');\n\
+         SELECT table_privs_are('public','orders','reader', ARRAY['SELECT'], \n\
+        \x20              'reader may only select');\n\
+         SELECT enum_has_labels('public','mood', ARRAY['sad','ok','happy'], \n\
+        \x20              'mood labels in order');\n\
+         SELECT cast_context_is('integer','bigint','implicit', 'int widens implicitly');\n\
+         SELECT has_domain('nonexistent_domain', 'this one should fail');",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_failed("verify.failed", exit::EXECUTION);
+
+    let assertions = report.json["tests"][0]["assertions"].as_array().unwrap();
+    assert_eq!(assertions.len(), 7);
+    let statuses: Vec<&str> = assertions
+        .iter()
+        .map(|a| a["status"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        statuses,
+        vec![
+            "passed", "passed", "passed", "passed", "passed", "passed", "failed"
+        ],
+        "only the last assertion should fail: {statuses:?}"
+    );
+}
+
+/// Every public assertion, exercised so that all of them pass.
+///
+/// This is coverage of *signatures* rather than of semantics. A typo, a missing
+/// overload, or a helper that does not resolve shows up here as an aborted file
+/// -- which is how the missing `hasnt_view(name, name)` would have been caught
+/// before review found it.
+#[test]
+fn every_public_assertion_resolves_and_passes() {
+    let db = database();
+    let project = project();
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+    project.test_file("every.sql", EVERY_ASSERTION);
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_success();
+
+    let assertions = report.json["tests"][0]["assertions"].as_array().unwrap();
+    assert_eq!(assertions.len(), 60, "the plan and the file must agree");
+
+    // The only non-passing entries should be the deliberate TODO and SKIP.
+    let unusual: Vec<&str> = assertions
+        .iter()
+        .map(|a| a["status"].as_str().unwrap_or_default())
+        .filter(|status| *status != "passed")
+        .collect();
+    assert_eq!(unusual, vec!["todo_failed", "skipped"], "{unusual:?}");
+
+    assert_eq!(
+        report.json["tests"][0]["notes"].as_array().unwrap().len(),
+        2
+    );
+}
+
+const EVERY_ASSERTION: &str = r"-- Every public assertion, exercised so that all of them pass.
+--
+-- The point is coverage of *signatures*, not of semantics: a typo, a missing
+-- overload, or a helper that does not resolve shows up here as an aborted file
+-- rather than as a mystery in someone's project months later.
+CREATE SCHEMA fixture;
+CREATE TABLE fixture.orders (id bigint PRIMARY KEY, status text NOT NULL DEFAULT 'new');
+INSERT INTO fixture.orders (id, status) VALUES (1, 'paid'), (2, 'pending');
+CREATE VIEW fixture.paid AS SELECT * FROM fixture.orders WHERE status = 'paid';
+CREATE SEQUENCE fixture.counter;
+CREATE TYPE fixture.mood AS ENUM ('sad', 'ok', 'happy');
+CREATE DOMAIN fixture.positive AS integer CHECK (VALUE > 0);
+CREATE ROLE fixture_reader;
+GRANT USAGE ON SCHEMA fixture TO fixture_reader;
+GRANT SELECT ON fixture.orders TO fixture_reader;
+
+SELECT plan(60);
+
+-- scalar
+SELECT ok(true, 'ok');
+SELECT pass('pass');
+SELECT is(1, 1, 'is');
+SELECT isnt(1, 2, 'isnt');
+SELECT matches('hello'::text, '^hel', 'matches');
+SELECT imatches('HELLO'::text, '^hel', 'imatches');
+SELECT doesnt_match('hello'::text, '^zzz', 'doesnt_match');
+SELECT cmp_ok(2, '>', 1, 'cmp_ok');
+SELECT isa_ok(1::bigint, 'bigint'::regtype, 'isa_ok');
+
+-- objects
+SELECT has_schema('fixture', 'has_schema');
+SELECT hasnt_schema('nope_schema', 'hasnt_schema');
+SELECT has_table('fixture', 'orders', 'has_table qualified');
+-- Two bare literals are both `unknown`, and PostgreSQL prefers `text` in that
+-- category, so this resolves to has_table(table, description) rather than
+-- has_table(schema, table). pgTAP behaves identically. Reaching the
+-- schema-qualified two-argument form needs explicit casts.
+SELECT has_table('fixture'::name, 'orders'::name);
+SELECT hasnt_table('fixture', 'nope', 'hasnt_table qualified');
+SELECT hasnt_table('fixture', 'nope');
+SELECT has_view('fixture', 'paid', 'has_view qualified');
+SELECT hasnt_view('fixture', 'nope', 'hasnt_view qualified');
+SELECT hasnt_view('fixture', 'nope');
+SELECT has_sequence('fixture', 'counter', 'has_sequence qualified');
+SELECT has_sequence('fixture'::name, 'counter'::name);
+SELECT hasnt_sequence('nope_seq', 'hasnt_sequence');
+SELECT hasnt_sequence('fixture'::name, 'nope_seq'::name);
+SELECT performs_within($$SELECT 1$$, 0, 60000);
+SELECT has_column('fixture', 'orders', 'status', 'has_column qualified');
+SELECT hasnt_column('fixture', 'orders', 'nope', 'hasnt_column qualified');
+SELECT has_pk('fixture', 'orders', 'has_pk');
+SELECT col_is_pk('fixture', 'orders', 'id', 'col_is_pk');
+SELECT col_is_pk('fixture'::name, 'orders'::name, 'id'::name);
+SELECT col_is_pk('fixture'::name, 'orders'::name, ARRAY['id']::name[]);
+-- Queries that cannot be compared are certainly not the same set, and this
+-- must record an assertion rather than abort the file.
+SELECT set_ne('SELECT id, status FROM fixture.orders', 'SELECT id FROM fixture.orders',
+              'set_ne on incomparable shapes');
+
+-- relations
+SELECT set_eq('SELECT status FROM fixture.orders', ARRAY['paid','pending'], 'set_eq array');
+SELECT set_eq('SELECT id FROM fixture.orders', 'SELECT unnest(ARRAY[1::bigint,2::bigint])', 'set_eq sql');
+SELECT set_ne('SELECT id FROM fixture.orders', 'SELECT 99::bigint', 'set_ne');
+SELECT set_has('SELECT id FROM fixture.orders', 'SELECT 1::bigint', 'set_has');
+SELECT bag_eq('SELECT id FROM fixture.orders', 'SELECT unnest(ARRAY[1::bigint,2::bigint])', 'bag_eq');
+SELECT bag_has('SELECT id FROM fixture.orders', 'SELECT 1::bigint', 'bag_has');
+SELECT results_eq('SELECT id FROM fixture.orders ORDER BY id',
+                  'SELECT unnest(ARRAY[1::bigint,2::bigint])', 'results_eq');
+SELECT is_empty('SELECT 1 WHERE false', 'is_empty');
+SELECT isnt_empty('SELECT id FROM fixture.orders', 'isnt_empty');
+
+-- behaviour
+SELECT throws_ok($$SELECT 1/0$$, '22012', NULL::text, 'throws_ok');
+SELECT throws_like($$SELECT * FROM fixture.nope$$, '%does not exist%', 'throws_like');
+SELECT throws_ilike($$SELECT * FROM fixture.nope$$, '%DOES NOT EXIST%', 'throws_ilike');
+SELECT throws_matching($$SELECT 1/0$$, 'division', 'throws_matching');
+SELECT lives_ok($$SELECT 1$$, 'lives_ok');
+SELECT performs_ok($$SELECT 1$$, 60000, 'performs_ok');
+SELECT performs_within($$SELECT 1$$, 0, 60000, 3, 'performs_within');
+
+-- catalog
+SELECT table_privs_are('fixture', 'orders', 'fixture_reader', ARRAY['SELECT'], 'table_privs_are');
+SELECT schema_privs_are('fixture', 'fixture_reader', ARRAY['USAGE'], 'schema_privs_are');
+SELECT table_owner_is('fixture', 'orders', current_user::name, 'table_owner_is');
+SELECT view_owner_is('fixture', 'paid', current_user::name, 'view_owner_is');
+SELECT has_enum('fixture', 'mood', 'has_enum');
+SELECT enum_has_labels('fixture', 'mood', ARRAY['sad','ok','happy'], 'enum_has_labels');
+SELECT has_domain('fixture', 'positive', 'has_domain');
+SELECT domain_type_is('fixture', 'positive', 'integer', 'domain_type_is');
+SELECT has_cast('integer', 'bigint', 'has_cast');
+SELECT cast_context_is('integer', 'bigint', 'implicit', 'cast_context_is');
+SELECT has_operator('integer', '+'::name, 'integer', 'integer', 'has_operator');
+SELECT has_leftop('-'::name, 'integer', 'integer', 'has_leftop');
+
+-- directives and notes
+SELECT diag('a note');
+SELECT note('another note');
+SELECT todo_start('not done');
+SELECT ok(false, 'a todo failure');
+SELECT todo_end();
+SELECT skip('skipped on purpose', 1);
+
+SELECT finish();
+";
+
+#[test]
+fn a_schema_left_by_the_pgtap_era_is_replaced_rather_than_refused() {
     let db = database();
     let project = project();
     project.migration(
@@ -926,20 +1118,293 @@ fn a_test_file_with_no_plan_is_a_failure_not_a_pass() {
         .report(&["deploy", "--uri", &db.uri()])
         .assert_success();
 
-    // Emits a passing assertion and then stops. Without the plan check this
-    // would look like a pass, which is the failure mode that matters most.
-    project.test_file("orders.sql", "SELECT ok(true, 'looks fine');");
+    // Exactly what a target tested by v0.2.0 carries: the reserved schema with
+    // the old marker table. Without recognising it, Zapadka would report a
+    // schema it had created itself as one it did not, and tell the operator to
+    // drop it -- an upgrade that blocks on a lie.
+    db.query(
+        "DROP SCHEMA IF EXISTS zapadka_test CASCADE;          CREATE SCHEMA zapadka_test;          CREATE TABLE zapadka_test.zapadka_pgtap (              singleton boolean PRIMARY KEY DEFAULT true,              pgtap_version text NOT NULL,              artifact_sha256 text NOT NULL,              zapadka_version text NOT NULL);          INSERT INTO zapadka_test.zapadka_pgtap (pgtap_version, artifact_sha256, zapadka_version)          VALUES ('1.3.4', repeat('a', 64), '0.2.0')",
+    );
 
-    // pgTAP itself refuses to run an assertion before a plan, so the failure
-    // arrives as a SQL error rather than as unparseable TAP. Either way the run
-    // fails, which is the property that matters.
+    project.test_file("orders.sql", "SELECT ok(true, 'runs after the upgrade');");
     let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_success();
+    assert!(
+        report
+            .diagnostic_codes()
+            .contains(&"test.library_installed"),
+        "the stale installation should be replaced: {:?}",
+        report.diagnostic_codes()
+    );
+    assert_eq!(
+        db.scalar("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace                    WHERE n.nspname = 'zapadka_test' AND c.relname = 'zapadka_pgtap'"),
+        "0",
+        "the old marker should be gone"
+    );
+}
+
+#[test]
+fn a_schema_that_merely_shares_a_name_is_not_dropped() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // Somebody else's schema that happens to hold a relation named
+    // `zapadka_pgtap`. Classifying it as a previous installation leads to
+    // DROP SCHEMA ... CASCADE, so the shape has to be checked and not just the
+    // name -- otherwise recognising the upgrade path becomes a way to destroy
+    // data.
+    db.query(
+        "DROP SCHEMA IF EXISTS zapadka_test CASCADE;          CREATE SCHEMA zapadka_test;          CREATE TABLE zapadka_test.zapadka_pgtap (whatever text);          INSERT INTO zapadka_test.zapadka_pgtap VALUES ('precious');",
+    );
+
+    project.test_file("orders.sql", "SELECT ok(true, 'x');");
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_failed("registry.upgrade_failed", exit::REGISTRY);
+
+    assert_eq!(
+        db.scalar("SELECT whatever FROM zapadka_test.zapadka_pgtap"),
+        "precious",
+        "an unrelated schema must survive"
+    );
+}
+
+#[test]
+fn throws_ok_reads_a_five_byte_argument_as_a_sqlstate() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint PRIMARY KEY);\n\
+         INSERT INTO public.orders VALUES (1);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // pgTAP disambiguates the short forms by length: a five-byte second
+    // argument is a SQLSTATE, anything else is the expected message. It is a
+    // trap -- the third argument is then the expected *message*, not a
+    // description -- but it is the trap every pgTAP file was written against,
+    // and quietly choosing differently would make `throws_ok(sql, 'boom')`
+    // fail as a malformed SQLSTATE.
+    project.test_file(
+        "checks.sql",
+        "SELECT throws_ok($$INSERT INTO public.orders VALUES (1)$$, '23505');\n\
+         SELECT throws_ok($$SELECT 1/0$$, 'division by zero');\n\
+         SELECT throws_ok($$SELECT 1/0$$, 'not the message it raises');",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_failed("verify.failed", exit::EXECUTION);
+    let statuses: Vec<&str> = report.json["tests"][0]["assertions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["status"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        statuses,
+        vec!["passed", "passed", "failed"],
+        "five bytes is a sqlstate; anything else is a message: {statuses:?}"
+    );
+}
+
+#[test]
+fn a_test_files_notes_reach_the_report() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    project.test_file(
+        "checks.sql",
+        "SELECT diag('setup context, before any assertion');\n\
+         SELECT ok(false, 'this fails');\n\
+         SELECT diag('why it failed');",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_failed("verify.failed", exit::EXECUTION);
+    let notes = report.json["tests"][0]["notes"].as_array().unwrap();
+    assert_eq!(notes.len(), 2);
+    // The first belongs to no assertion, and saying otherwise would misreport
+    // where it came from.
+    assert!(notes[0].get("after_assertion").is_none());
+    assert_eq!(notes[1]["after_assertion"], 1);
+}
+
+#[test]
+fn a_wrong_sqlstate_expectation_reports_both_codes() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint PRIMARY KEY);\n\
+         INSERT INTO public.orders VALUES (1);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // pgTAP would tell you the error text did not match. The point of keeping
+    // SQLSTATE as its own field is being told 23505 arrived where 23503 was
+    // expected.
+    project.test_file(
+        "checks.sql",
+        "SELECT throws_ok($$INSERT INTO public.orders VALUES (1)$$, '23503', \n\
+        \x20              'expects a foreign-key violation');",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_failed("verify.failed", exit::EXECUTION);
+    let diagnostics = &report.json["tests"][0]["assertions"][0]["diagnostics"];
+    let caught = diagnostics["caught"].as_str().unwrap_or_default();
+    let expected = diagnostics["expected"].as_str().unwrap_or_default();
+    assert!(caught.contains("23505"), "the real sqlstate: {caught}");
+    assert!(
+        expected.contains("23503"),
+        "the expected sqlstate: {expected}"
+    );
+}
+
+#[test]
+fn a_result_set_failure_reports_the_rows_and_their_types() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint, status text);\n\
+         INSERT INTO public.orders VALUES (1,'paid'),(2,'pending');",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    project.test_file(
+        "orders.sql",
+        "SELECT set_eq(\n\
+        \x20   'SELECT id, status FROM public.orders',\n\
+        \x20   $$VALUES (1::bigint,'paid'),(2::bigint,'shipped')$$,\n\
+        \x20   'orders have the expected statuses');",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_failed("verify.failed", exit::EXECUTION);
+
+    // pgTAP would render both sides with `record::text` and leave the reader to
+    // spot the difference. The structured detail names the rows and the types.
+    let diagnostics = &report.json["tests"][0]["assertions"][0]["diagnostics"];
+    assert_eq!(diagnostics["kind"], "set");
+    assert_eq!(diagnostics["missing_count"], "1");
+    assert_eq!(diagnostics["extra_count"], "1");
+    assert!(
+        diagnostics["missing"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("shipped"),
+        "the missing row should be named: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics["columns"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("bigint"),
+        "column types should be reported: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn a_test_file_may_return_whatever_it_likes() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // Under TAP every result row had to be exactly one text column, so this
+    // file could not run at all. The runner now ignores output entirely.
+    project.test_file(
+        "orders.sql",
+        "SELECT 1 AS a, 2 AS b, 3 AS c;\n\
+         CREATE TEMP TABLE scratch AS SELECT generate_series(1,3) AS n;\n\
+         SELECT n, n * 2 FROM scratch;\n\
+         SELECT is((SELECT count(*) FROM scratch), 3::bigint, 'scratch has three rows');",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_success();
+    assert_eq!(
+        report.json["tests"][0]["assertions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn a_plan_is_optional_but_a_wrong_one_fails() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // A file with no plan at all. Under TAP this had to fail: `1..N` was the
+    // only way a text consumer could tell a finished stream from a truncated
+    // one. Reading a table, the runner knows the transaction completed, so the
+    // ceremony buys nothing and the file is simply valid.
+    project.test_file("orders.sql", "SELECT ok(true, 'looks fine');");
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_success();
+    assert_eq!(
+        report.json["tests"][0]["assertions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // A plan that disagrees with what ran is still a failure, and now it is one
+    // the runner enforces. pgTAP could only ever report this as a diagnostic.
+    project.test_file(
+        "mismatch.sql",
+        "SELECT plan(3); SELECT ok(true, 'only one'); SELECT finish();",
+    );
+    let report = project.report(&["test", "mismatch.sql", "--uri", &db.uri()]);
     report.assert_failed("verify.failed", exit::EXECUTION);
     let message = report.json["tests"][0]["error"]["message"]
         .as_str()
         .unwrap_or_default()
         .to_lowercase();
-    assert!(message.contains("plan"), "{message}");
+    assert!(message.contains("planned 3"), "{message}");
 }
 
 #[test]

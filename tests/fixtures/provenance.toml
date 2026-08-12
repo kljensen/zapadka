@@ -144,12 +144,21 @@ owning the transaction, so a file cannot opt out.
 """
 
 [[scenario]]
-name = "a test file with no plan fails rather than passing"
-test = "crates/zapadka/tests/postgres.rs::a_test_file_with_no_plan_is_a_failure_not_a_pass"
+name = "a truncated run is not a pass, with or without a plan"
+test = "crates/zapadka/tests/postgres.rs::a_plan_is_optional_but_a_wrong_one_fails"
 inspired_by = "Test::Harness TAP semantics"
 source = "https://testanything.org/tap-version-13-specification.html"
 classification = "adapted"
 question = """
-A file whose SQL dies partway through emits some passing results and no plan.
-Does the harness call that a pass?
+A file whose SQL dies partway through records some passing assertions. Does the
+harness call that a pass?
+
+TAP answered this with the plan: `1..N` up front, and a consumer that counted.
+That is why the count was mandatory, and why a file without one had to fail.
+
+Zapadka reads results from a table inside the transaction it owns, so a file
+that died is a SQL error and fails on that alone -- the count is no longer what
+protects anyone. A declared plan is therefore optional, and kept only because
+"I expect exactly N assertions" is still a real thing to assert. When declared,
+it is enforced; pgTAP could only ever report a mismatch as a diagnostic.
 """
