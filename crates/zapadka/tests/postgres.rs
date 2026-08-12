@@ -965,6 +965,138 @@ fn exception_privilege_and_type_assertions_work_and_report_structurally() {
     );
 }
 
+/// Every public assertion, exercised so that all of them pass.
+///
+/// This is coverage of *signatures* rather than of semantics. A typo, a missing
+/// overload, or a helper that does not resolve shows up here as an aborted file
+/// -- which is how the missing `hasnt_view(name, name)` would have been caught
+/// before review found it.
+#[test]
+fn every_public_assertion_resolves_and_passes() {
+    let db = database();
+    let project = project();
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+    project.test_file("every.sql", EVERY_ASSERTION);
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_success();
+
+    let assertions = report.json["tests"][0]["assertions"].as_array().unwrap();
+    assert_eq!(assertions.len(), 55, "the plan and the file must agree");
+
+    // The only non-passing entries should be the deliberate TODO and SKIP.
+    let unusual: Vec<&str> = assertions
+        .iter()
+        .map(|a| a["status"].as_str().unwrap_or_default())
+        .filter(|status| *status != "passed")
+        .collect();
+    assert_eq!(unusual, vec!["todo_failed", "skipped"], "{unusual:?}");
+
+    assert_eq!(
+        report.json["tests"][0]["notes"].as_array().unwrap().len(),
+        2
+    );
+}
+
+const EVERY_ASSERTION: &str = r"-- Every public assertion, exercised so that all of them pass.
+--
+-- The point is coverage of *signatures*, not of semantics: a typo, a missing
+-- overload, or a helper that does not resolve shows up here as an aborted file
+-- rather than as a mystery in someone's project months later.
+CREATE SCHEMA fixture;
+CREATE TABLE fixture.orders (id bigint PRIMARY KEY, status text NOT NULL DEFAULT 'new');
+INSERT INTO fixture.orders (id, status) VALUES (1, 'paid'), (2, 'pending');
+CREATE VIEW fixture.paid AS SELECT * FROM fixture.orders WHERE status = 'paid';
+CREATE SEQUENCE fixture.counter;
+CREATE TYPE fixture.mood AS ENUM ('sad', 'ok', 'happy');
+CREATE DOMAIN fixture.positive AS integer CHECK (VALUE > 0);
+CREATE ROLE fixture_reader;
+GRANT USAGE ON SCHEMA fixture TO fixture_reader;
+GRANT SELECT ON fixture.orders TO fixture_reader;
+
+SELECT plan(55);
+
+-- scalar
+SELECT ok(true, 'ok');
+SELECT pass('pass');
+SELECT is(1, 1, 'is');
+SELECT isnt(1, 2, 'isnt');
+SELECT matches('hello'::text, '^hel', 'matches');
+SELECT imatches('HELLO'::text, '^hel', 'imatches');
+SELECT doesnt_match('hello'::text, '^zzz', 'doesnt_match');
+SELECT cmp_ok(2, '>', 1, 'cmp_ok');
+SELECT isa_ok(1::bigint, 'bigint'::regtype, 'isa_ok');
+
+-- objects
+SELECT has_schema('fixture', 'has_schema');
+SELECT hasnt_schema('nope_schema', 'hasnt_schema');
+SELECT has_table('fixture', 'orders', 'has_table qualified');
+-- Two bare literals are both `unknown`, and PostgreSQL prefers `text` in that
+-- category, so this resolves to has_table(table, description) rather than
+-- has_table(schema, table). pgTAP behaves identically. Reaching the
+-- schema-qualified two-argument form needs explicit casts.
+SELECT has_table('fixture'::name, 'orders'::name);
+SELECT hasnt_table('fixture', 'nope', 'hasnt_table qualified');
+SELECT hasnt_table('fixture', 'nope');
+SELECT has_view('fixture', 'paid', 'has_view qualified');
+SELECT hasnt_view('fixture', 'nope', 'hasnt_view qualified');
+SELECT hasnt_view('fixture', 'nope');
+SELECT has_sequence('fixture', 'counter', 'has_sequence qualified');
+SELECT has_sequence('fixture'::name, 'counter'::name);
+SELECT hasnt_sequence('nope_seq', 'hasnt_sequence');
+SELECT has_column('fixture', 'orders', 'status', 'has_column qualified');
+SELECT hasnt_column('fixture', 'orders', 'nope', 'hasnt_column qualified');
+SELECT has_pk('fixture', 'orders', 'has_pk');
+SELECT col_is_pk('fixture', 'orders', 'id', 'col_is_pk');
+
+-- relations
+SELECT set_eq('SELECT status FROM fixture.orders', ARRAY['paid','pending'], 'set_eq array');
+SELECT set_eq('SELECT id FROM fixture.orders', 'SELECT unnest(ARRAY[1::bigint,2::bigint])', 'set_eq sql');
+SELECT set_ne('SELECT id FROM fixture.orders', 'SELECT 99::bigint', 'set_ne');
+SELECT set_has('SELECT id FROM fixture.orders', 'SELECT 1::bigint', 'set_has');
+SELECT bag_eq('SELECT id FROM fixture.orders', 'SELECT unnest(ARRAY[1::bigint,2::bigint])', 'bag_eq');
+SELECT bag_has('SELECT id FROM fixture.orders', 'SELECT 1::bigint', 'bag_has');
+SELECT results_eq('SELECT id FROM fixture.orders ORDER BY id',
+                  'SELECT unnest(ARRAY[1::bigint,2::bigint])', 'results_eq');
+SELECT is_empty('SELECT 1 WHERE false', 'is_empty');
+SELECT isnt_empty('SELECT id FROM fixture.orders', 'isnt_empty');
+
+-- behaviour
+SELECT throws_ok($$SELECT 1/0$$, '22012', NULL::text, 'throws_ok');
+SELECT throws_like($$SELECT * FROM fixture.nope$$, '%does not exist%', 'throws_like');
+SELECT throws_ilike($$SELECT * FROM fixture.nope$$, '%DOES NOT EXIST%', 'throws_ilike');
+SELECT throws_matching($$SELECT 1/0$$, 'division', 'throws_matching');
+SELECT lives_ok($$SELECT 1$$, 'lives_ok');
+SELECT performs_ok($$SELECT 1$$, 60000, 'performs_ok');
+SELECT performs_within($$SELECT 1$$, 0, 60000, 3, 'performs_within');
+
+-- catalog
+SELECT table_privs_are('fixture', 'orders', 'fixture_reader', ARRAY['SELECT'], 'table_privs_are');
+SELECT schema_privs_are('fixture', 'fixture_reader', ARRAY['USAGE'], 'schema_privs_are');
+SELECT table_owner_is('fixture', 'orders', current_user::name, 'table_owner_is');
+SELECT view_owner_is('fixture', 'paid', current_user::name, 'view_owner_is');
+SELECT has_enum('fixture', 'mood', 'has_enum');
+SELECT enum_has_labels('fixture', 'mood', ARRAY['sad','ok','happy'], 'enum_has_labels');
+SELECT has_domain('fixture', 'positive', 'has_domain');
+SELECT domain_type_is('fixture', 'positive', 'integer', 'domain_type_is');
+SELECT has_cast('integer', 'bigint', 'has_cast');
+SELECT cast_context_is('integer', 'bigint', 'implicit', 'cast_context_is');
+SELECT has_operator('integer', '+'::name, 'integer', 'integer', 'has_operator');
+SELECT has_leftop('-'::name, 'integer', 'integer', 'has_leftop');
+
+-- directives and notes
+SELECT diag('a note');
+SELECT note('another note');
+SELECT todo_start('not done');
+SELECT ok(false, 'a todo failure');
+SELECT todo_end();
+SELECT skip('skipped on purpose', 1);
+
+SELECT finish();
+";
+
 #[test]
 fn throws_ok_reads_a_five_byte_argument_as_a_sqlstate() {
     let db = database();
