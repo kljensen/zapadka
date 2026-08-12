@@ -57,6 +57,8 @@ const NATIVE_SOURCE: &[(&str, &str)] = &[
     ("core", include_str!("../sql/core.sql")),
     ("objects", include_str!("../sql/objects.sql")),
     ("relations", include_str!("../sql/relations.sql")),
+    ("behaviour", include_str!("../sql/behaviour.sql")),
+    ("catalog", include_str!("../sql/catalog.sql")),
 ];
 
 /// What is installed in a target's test schema.

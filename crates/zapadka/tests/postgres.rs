@@ -914,6 +914,93 @@ fn a_test_file_cannot_leave_anything_behind() {
 }
 
 #[test]
+fn exception_privilege_and_type_assertions_work_and_report_structurally() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint PRIMARY KEY, status text);\n\
+         INSERT INTO public.orders VALUES (1,'paid');\n\
+         CREATE TYPE public.mood AS ENUM ('sad','ok','happy');",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // Everything here runs inside the runner's transaction and is rolled back,
+    // including the role.
+    project.test_file(
+        "checks.sql",
+        "CREATE ROLE reader;\n\
+         GRANT SELECT ON public.orders TO reader;\n\
+         SELECT throws_ok($$INSERT INTO public.orders VALUES (1,'dup')$$, '23505', \n\
+        \x20              'a duplicate key is rejected');\n\
+         SELECT throws_like($$SELECT * FROM public.nope$$, '%does not exist%', \n\
+        \x20              'a missing relation is named');\n\
+         SELECT lives_ok($$SELECT 1$$, 'a trivial query lives');\n\
+         SELECT table_privs_are('public','orders','reader', ARRAY['SELECT'], \n\
+        \x20              'reader may only select');\n\
+         SELECT enum_has_labels('public','mood', ARRAY['sad','ok','happy'], \n\
+        \x20              'mood labels in order');\n\
+         SELECT cast_context_is('integer','bigint','implicit', 'int widens implicitly');\n\
+         SELECT has_domain('nonexistent_domain', 'this one should fail');",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_failed("verify.failed", exit::EXECUTION);
+
+    let assertions = report.json["tests"][0]["assertions"].as_array().unwrap();
+    assert_eq!(assertions.len(), 7);
+    let statuses: Vec<&str> = assertions
+        .iter()
+        .map(|a| a["status"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        statuses,
+        vec![
+            "passed", "passed", "passed", "passed", "passed", "passed", "failed"
+        ],
+        "only the last assertion should fail: {statuses:?}"
+    );
+}
+
+#[test]
+fn a_wrong_sqlstate_expectation_reports_both_codes() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint PRIMARY KEY);\n\
+         INSERT INTO public.orders VALUES (1);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // pgTAP would tell you the error text did not match. The point of keeping
+    // SQLSTATE as its own field is being told 23505 arrived where 23503 was
+    // expected.
+    project.test_file(
+        "checks.sql",
+        "SELECT throws_ok($$INSERT INTO public.orders VALUES (1)$$, '23503', \n\
+        \x20              'expects a foreign-key violation');",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_failed("verify.failed", exit::EXECUTION);
+    let diagnostics = &report.json["tests"][0]["assertions"][0]["diagnostics"];
+    let caught = diagnostics["caught"].as_str().unwrap_or_default();
+    let expected = diagnostics["expected"].as_str().unwrap_or_default();
+    assert!(caught.contains("23505"), "the real sqlstate: {caught}");
+    assert!(
+        expected.contains("23503"),
+        "the expected sqlstate: {expected}"
+    );
+}
+
+#[test]
 fn a_result_set_failure_reports_the_rows_and_their_types() {
     let db = database();
     let project = project();
