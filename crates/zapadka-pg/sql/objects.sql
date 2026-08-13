@@ -468,3 +468,100 @@ CREATE OR REPLACE FUNCTION hasnt_sequence(name, name) RETURNS boolean AS $$
     SELECT hasnt_sequence($1, $2,
         'sequence ' || quote_ident($1) || '.' || quote_ident($2) || ' should not exist');
 $$ LANGUAGE sql;
+
+-- -- Unambiguous schema-qualified forms ---------------------------------------
+--
+-- `has_table('app', 'orders')` does not mean what it looks like. Two bare
+-- literals are `unknown`, PostgreSQL prefers `text` in that category, and the
+-- call resolves to has_table(table, description) -- so it checks a table named
+-- `app` and uses `orders` as the description. pgTAP has the same hazard.
+--
+-- Reaching the qualified form otherwise requires `::name` casts, which means
+-- knowing about type-resolution preferences in order to write a schema
+-- qualification. These spellings remove that: `_in` always means (schema,
+-- object), whatever the literals happen to be.
+
+CREATE OR REPLACE FUNCTION has_table_in(name, name, text) RETURNS boolean AS $$
+    SELECT has_table($1::name, $2::name, $3);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION has_table_in(name, name) RETURNS boolean AS $$
+    SELECT has_table($1::name, $2::name);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION hasnt_table_in(name, name, text) RETURNS boolean AS $$
+    SELECT hasnt_table($1::name, $2::name, $3);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION hasnt_table_in(name, name) RETURNS boolean AS $$
+    SELECT hasnt_table($1::name, $2::name);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION has_view_in(name, name, text) RETURNS boolean AS $$
+    SELECT has_view($1::name, $2::name, $3);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION has_view_in(name, name) RETURNS boolean AS $$
+    SELECT has_view($1::name, $2::name);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION hasnt_view_in(name, name, text) RETURNS boolean AS $$
+    SELECT hasnt_view($1::name, $2::name, $3);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION hasnt_view_in(name, name) RETURNS boolean AS $$
+    SELECT hasnt_view($1::name, $2::name);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION has_sequence_in(name, name, text) RETURNS boolean AS $$
+    SELECT has_sequence($1::name, $2::name, $3);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION has_sequence_in(name, name) RETURNS boolean AS $$
+    SELECT has_sequence($1::name, $2::name);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION hasnt_sequence_in(name, name, text) RETURNS boolean AS $$
+    SELECT hasnt_sequence($1::name, $2::name, $3);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION hasnt_sequence_in(name, name) RETURNS boolean AS $$
+    SELECT hasnt_sequence($1::name, $2::name);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION has_column_in(name, name, name, text) RETURNS boolean AS $$
+    SELECT has_column($1::name, $2::name, $3::name, $4);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION has_column_in(name, name, name) RETURNS boolean AS $$
+    SELECT has_column($1::name, $2::name, $3::name);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION hasnt_column_in(name, name, name, text) RETURNS boolean AS $$
+    SELECT hasnt_column($1::name, $2::name, $3::name, $4);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION hasnt_column_in(name, name, name) RETURNS boolean AS $$
+    SELECT hasnt_column($1::name, $2::name, $3::name);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION col_is_pk_in(name, name, name, text) RETURNS boolean AS $$
+    SELECT col_is_pk($1::name, $2::name, ARRAY[$3]::name[], $4);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION col_is_pk_in(name, name, name) RETURNS boolean AS $$
+    SELECT col_is_pk($1::name, $2::name, ARRAY[$3]::name[]);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION col_is_pk_in(name, name, name[], text) RETURNS boolean AS $$
+    SELECT col_is_pk($1::name, $2::name, $3, $4);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION has_pk_in(name, name, text) RETURNS boolean AS $$
+    SELECT has_pk($1::name, $2::name, $3);
+$$ LANGUAGE sql;
+
+CREATE OR REPLACE FUNCTION has_pk_in(name, name) RETURNS boolean AS $$
+    SELECT has_pk($1::name, $2::name, 'table ' || quote_ident($1) || '.'
+        || quote_ident($2) || ' should have a primary key');
+$$ LANGUAGE sql;

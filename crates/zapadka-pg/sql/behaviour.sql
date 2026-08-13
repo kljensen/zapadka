@@ -44,6 +44,19 @@ DECLARE
     caught  jsonb;
     matched boolean;
 BEGIN
+    -- A pgTAP file writing `throws_ok(sql, '23505', 'my description')` means
+    -- the third argument as a description; here it is the expected message, so
+    -- the assertion would quietly check something the author never wrote. A
+    -- description that looks like a SQLSTATE is the reverse mistake. Both are
+    -- refused rather than reinterpreted -- the same reasoning as blocking on an
+    -- unknown nontransactional outcome: silence is the expensive answer.
+    IF _looks_like_sqlstate($4) THEN
+        RAISE EXCEPTION 'the description % looks like a SQLSTATE', quote_literal($4)
+            USING HINT = 'arguments are (sql, sqlstate, message, description); '
+                      || 'if you meant to match a SQLSTATE, use '
+                      || 'throws_sqlstate(sql, code, description)';
+    END IF;
+
     BEGIN
         EXECUTE $1;
     EXCEPTION WHEN OTHERS THEN
@@ -72,24 +85,59 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- The shorter forms are ambiguous by design, and pgTAP resolves the ambiguity
--- by length: a five-byte second argument is a SQLSTATE, anything else is the
--- expected message. Guessing differently would make
--- `throws_ok(sql, 'some message')` fail as a malformed SQLSTATE, and
--- `throws_ok(sql, '23505', 'expected message')` pass while ignoring the
--- message entirely.
+-- Whether a string is shaped like a SQLSTATE.
+--
+-- Five characters, digits and upper-case letters. PostgreSQL's own class/
+-- subclass encoding, so `23505` and `P0001` match while `boom` does not.
+CREATE OR REPLACE FUNCTION _looks_like_sqlstate(candidate text)
+RETURNS boolean AS $$
+    SELECT candidate IS NOT NULL AND candidate ~ '^[0-9A-Z]{5}$';
+$$ LANGUAGE sql IMMUTABLE;
+
+-- `throws_ok(sql, sqlstate_or_message, description)`
+--
+-- The third argument is the description, which is what everyone reading the
+-- call expects it to be. pgTAP makes it the expected *message* whenever the
+-- second argument happens to be five bytes long, and that is a trap: it caught
+-- the author of this library, and then caught the test written to check it.
+--
+-- The second argument still auto-detects, because `throws_ok(sql, '23505')` and
+-- `throws_ok(sql, 'division by zero')` are both natural and unambiguous. What
+-- is gone is the third argument changing meaning underneath you.
+--
+-- A file written for pgTAP that passes a message third is refused rather than
+-- silently reinterpreted -- see `_reject_pgtap_message_form`.
 CREATE OR REPLACE FUNCTION throws_ok(text, text, text) RETURNS boolean AS $$
     SELECT CASE
-        WHEN octet_length($2) = 5 THEN throws_ok($1, $2, $3, NULL::text)
+        WHEN _looks_like_sqlstate($2) THEN throws_ok($1, $2, NULL::text, $3)
         ELSE throws_ok($1, NULL::text, $2, $3)
     END;
 $$ LANGUAGE sql;
 
 CREATE OR REPLACE FUNCTION throws_ok(text, text) RETURNS boolean AS $$
     SELECT CASE
-        WHEN octet_length($2) = 5 THEN throws_ok($1, $2, NULL::text, NULL::text)
+        WHEN _looks_like_sqlstate($2) THEN throws_ok($1, $2, NULL::text, NULL::text)
         ELSE throws_ok($1, NULL::text, $2, NULL::text)
     END;
+$$ LANGUAGE sql;
+
+-- `throws_sqlstate(sql, code, description)` -- the unambiguous spelling.
+--
+-- Nothing is inferred: the code is a code and the description is a
+-- description. Preferred in new tests.
+CREATE OR REPLACE FUNCTION throws_sqlstate(text, text, text) RETURNS boolean AS $$
+BEGIN
+    IF NOT _looks_like_sqlstate($2) THEN
+        RAISE EXCEPTION 'throws_sqlstate expects a SQLSTATE, not %', quote_literal($2)
+            USING HINT = 'a SQLSTATE is five characters, such as 23505; '
+                      || 'use throws_ok to match on the message instead';
+    END IF;
+    RETURN throws_ok($1, $2, NULL::text, $3);
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION throws_sqlstate(text, text) RETURNS boolean AS $$
+    SELECT throws_sqlstate($1, $2, NULL::text);
 $$ LANGUAGE sql;
 
 CREATE OR REPLACE FUNCTION throws_ok(text) RETURNS boolean AS $$

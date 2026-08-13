@@ -1024,7 +1024,7 @@ fn every_public_assertion_resolves_and_passes() {
     report.assert_success();
 
     let assertions = report.json["tests"][0]["assertions"].as_array().unwrap();
-    assert_eq!(assertions.len(), 60, "the plan and the file must agree");
+    assert_eq!(assertions.len(), 66, "the plan and the file must agree");
 
     // The only non-passing entries should be the deliberate TODO and SKIP.
     let unusual: Vec<&str> = assertions
@@ -1056,7 +1056,7 @@ CREATE ROLE fixture_reader;
 GRANT USAGE ON SCHEMA fixture TO fixture_reader;
 GRANT SELECT ON fixture.orders TO fixture_reader;
 
-SELECT plan(60);
+SELECT plan(66);
 
 -- scalar
 SELECT ok(true, 'ok');
@@ -1077,7 +1077,13 @@ SELECT has_table('fixture', 'orders', 'has_table qualified');
 -- category, so this resolves to has_table(table, description) rather than
 -- has_table(schema, table). pgTAP behaves identically. Reaching the
 -- schema-qualified two-argument form needs explicit casts.
-SELECT has_table('fixture'::name, 'orders'::name);
+SELECT has_table_in('fixture', 'orders');
+SELECT hasnt_table_in('fixture', 'nope');
+SELECT has_view_in('fixture', 'paid');
+SELECT has_column_in('fixture', 'orders', 'status');
+SELECT col_is_pk_in('fixture', 'orders', 'id');
+SELECT has_pk_in('fixture', 'orders');
+SELECT throws_sqlstate($$SELECT 1/0$$, '22012', 'throws_sqlstate');
 SELECT hasnt_table('fixture', 'nope', 'hasnt_table qualified');
 SELECT hasnt_table('fixture', 'nope');
 SELECT has_view('fixture', 'paid', 'has_view qualified');
@@ -1217,6 +1223,47 @@ fn a_schema_that_merely_shares_a_name_is_not_dropped() {
 }
 
 #[test]
+fn a_sqlstate_where_a_description_belongs_is_refused() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // Arguments in pgTAP's order, where the third was the expected message.
+    // Reinterpreting it silently would make the file assert something its
+    // author never wrote, so it is refused instead -- the same reasoning as
+    // blocking on an unknown nontransactional outcome.
+    project.test_file(
+        "checks.sql",
+        "SELECT throws_ok($$SELECT 1/0$$, 'division by zero', '22012');",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_failed("verify.failed", exit::EXECUTION);
+    let message = report.json["tests"][0]["error"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.contains("looks like a SQLSTATE"),
+        "the refusal should name the problem: {message}"
+    );
+    // PostgreSQL's HINT travels in its own field rather than in the message.
+    let hint = report.json["tests"][0]["error"]["hint"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        hint.contains("throws_sqlstate"),
+        "and point at the unambiguous spelling: {hint}"
+    );
+}
+
+#[test]
 fn throws_ok_reads_a_five_byte_argument_as_a_sqlstate() {
     let db = database();
     let project = project();
@@ -1230,12 +1277,10 @@ fn throws_ok_reads_a_five_byte_argument_as_a_sqlstate() {
         .report(&["deploy", "--uri", &db.uri()])
         .assert_success();
 
-    // pgTAP disambiguates the short forms by length: a five-byte second
-    // argument is a SQLSTATE, anything else is the expected message. It is a
-    // trap -- the third argument is then the expected *message*, not a
-    // description -- but it is the trap every pgTAP file was written against,
-    // and quietly choosing differently would make `throws_ok(sql, 'boom')`
-    // fail as a malformed SQLSTATE.
+    // The second argument still auto-detects, because `throws_ok(sql, '23505')`
+    // and `throws_ok(sql, 'division by zero')` are both natural. What changed
+    // from pgTAP is that the *third* argument no longer shifts meaning: it is
+    // the description, always.
     project.test_file(
         "checks.sql",
         "SELECT throws_ok($$INSERT INTO public.orders VALUES (1)$$, '23505');\n\

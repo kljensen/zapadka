@@ -411,21 +411,23 @@ $$ LANGUAGE sql;
 CREATE OR REPLACE FUNCTION cmp_ok(anyelement, text, anyelement, text)
 RETURNS boolean AS $$
 DECLARE
-    result    boolean;
-    op_schema name;
-    op_name   name;
+    result  boolean;
+    op_name name;
 BEGIN
-    -- Resolved against the search path rather than forced into pg_catalog: an
-    -- operator defined in an application schema is an ordinary thing to compare
-    -- with, and forcing the catalogue made those calls abort the file.
+    -- Existence is checked, then PostgreSQL resolves the call itself.
     --
-    -- Both halves come back from the catalogue, so what gets interpolated is a
-    -- name PostgreSQL gave us. The operator symbol cannot be quoted as an
-    -- identifier -- OPERATOR("=") is not valid -- which is precisely why it has
-    -- to be looked up rather than taken on trust from the caller.
-    SELECT n.nspname, o.oprname INTO op_schema, op_name
+    -- An earlier version picked a schema with LIMIT 1 and pinned the operator
+    -- there. That ignores the operands: `<` in one schema and `<` in another
+    -- are different operators, and for an overloaded name the arbitrary one
+    -- wins. Letting PostgreSQL resolve also gets implicit casts right, which
+    -- pinning cannot -- comparing an integer with a numeric needs the cast the
+    -- planner would apply.
+    --
+    -- The symbol is still looked up rather than trusted, because it cannot be
+    -- quoted as an identifier: OPERATOR("=") is not valid syntax, so the only
+    -- protection available is that the string came from the catalogue.
+    SELECT o.oprname INTO op_name
       FROM pg_catalog.pg_operator o
-      JOIN pg_catalog.pg_namespace n ON n.oid = o.oprnamespace
      WHERE o.oprname = $2
        AND pg_catalog.pg_operator_is_visible(o.oid)
      LIMIT 1;
@@ -434,8 +436,7 @@ BEGIN
         RAISE EXCEPTION 'no operator named % is visible', $2
             USING HINT = 'cmp_ok takes an operator such as ''='', ''<'' or ''@>''';
     END IF;
-    EXECUTE format('SELECT $1 OPERATOR(%I.%s) $2', op_schema, op_name)
-        INTO result USING $1, $3;
+    EXECUTE format('SELECT $1 %s $2', op_name) INTO result USING $1, $3;
     RETURN _record(
         'cmp_ok',
         coalesce(result, false),
