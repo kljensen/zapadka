@@ -3,3 +3,8 @@
 # CI, the README, docs/development/code-quality.md -- is wrong.
 [alias]
 xtask = "run --quiet --package xtask --"
+
+# Ask MSVC's linker for deterministic PE/COFF output. cc-rs applies the same
+# option to the vendored C objects; this covers the final Rust executable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/Brepro"]
