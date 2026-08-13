@@ -121,6 +121,8 @@ RETURNS boolean AS $$
         'col_not_null', _column_relation_oid($1, $2), $1, $2, $3, true, $4
     );
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_not_null(name, name, name, text) IS
+    'Assert that a qualified column is NOT NULL.';
 
 CREATE OR REPLACE FUNCTION col_not_null(name, name, name)
 RETURNS boolean AS $$
@@ -128,6 +130,8 @@ RETURNS boolean AS $$
         'column ' || quote_ident($1) || '.' || quote_ident($2) || '.'
         || quote_ident($3) || ' should be NOT NULL');
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_not_null(name, name, name) IS
+    'Assert that a qualified column is NOT NULL.';
 
 CREATE OR REPLACE FUNCTION col_not_null(name, name, text)
 RETURNS boolean AS $$
@@ -135,22 +139,30 @@ RETURNS boolean AS $$
         'col_not_null', _column_relation_oid($1), NULL, $1, $2, true, $3
     );
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_not_null(name, name, text) IS
+    'Assert that a visible column is NOT NULL.';
 
 CREATE OR REPLACE FUNCTION col_not_null(name, name)
 RETURNS boolean AS $$
     SELECT col_not_null($1, $2,
         'column ' || quote_ident($1) || '.' || quote_ident($2) || ' should be NOT NULL');
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_not_null(name, name) IS
+    'Assert that a visible column is NOT NULL.';
 
 CREATE OR REPLACE FUNCTION col_not_null_in(name, name, name, text)
 RETURNS boolean AS $$
     SELECT col_not_null($1::name, $2::name, $3::name, $4);
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_not_null_in(name, name, name, text) IS
+    'Unambiguously assert that a qualified column is NOT NULL.';
 
 CREATE OR REPLACE FUNCTION col_not_null_in(name, name, name)
 RETURNS boolean AS $$
     SELECT col_not_null($1::name, $2::name, $3::name);
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_not_null_in(name, name, name) IS
+    'Unambiguously assert that a qualified column is NOT NULL.';
 
 CREATE OR REPLACE FUNCTION col_is_null(name, name, name, text)
 RETURNS boolean AS $$
@@ -158,6 +170,8 @@ RETURNS boolean AS $$
         'col_is_null', _column_relation_oid($1, $2), $1, $2, $3, false, $4
     );
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_is_null(name, name, name, text) IS
+    'Assert that a qualified column allows NULL.';
 
 CREATE OR REPLACE FUNCTION col_is_null(name, name, name)
 RETURNS boolean AS $$
@@ -165,6 +179,8 @@ RETURNS boolean AS $$
         'column ' || quote_ident($1) || '.' || quote_ident($2) || '.'
         || quote_ident($3) || ' should allow NULL');
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_is_null(name, name, name) IS
+    'Assert that a qualified column allows NULL.';
 
 CREATE OR REPLACE FUNCTION col_is_null(name, name, text)
 RETURNS boolean AS $$
@@ -172,22 +188,30 @@ RETURNS boolean AS $$
         'col_is_null', _column_relation_oid($1), NULL, $1, $2, false, $3
     );
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_is_null(name, name, text) IS
+    'Assert that a visible column allows NULL.';
 
 CREATE OR REPLACE FUNCTION col_is_null(name, name)
 RETURNS boolean AS $$
     SELECT col_is_null($1, $2,
         'column ' || quote_ident($1) || '.' || quote_ident($2) || ' should allow NULL');
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_is_null(name, name) IS
+    'Assert that a visible column allows NULL.';
 
 CREATE OR REPLACE FUNCTION col_is_null_in(name, name, name, text)
 RETURNS boolean AS $$
     SELECT col_is_null($1::name, $2::name, $3::name, $4);
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_is_null_in(name, name, name, text) IS
+    'Unambiguously assert that a qualified column allows NULL.';
 
 CREATE OR REPLACE FUNCTION col_is_null_in(name, name, name)
 RETURNS boolean AS $$
     SELECT col_is_null($1::name, $2::name, $3::name);
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_is_null_in(name, name, name) IS
+    'Unambiguously assert that a qualified column allows NULL.';
 
 CREATE OR REPLACE FUNCTION _record_column_default_presence(
     assertion_kind text,
@@ -214,6 +238,8 @@ RETURNS boolean AS $$
         'col_has_default', _column_relation_oid($1, $2), $1, $2, $3, true, $4
     );
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_has_default(name, name, name, text) IS
+    'Assert that a qualified column has a default.';
 
 CREATE OR REPLACE FUNCTION col_has_default(name, name, name)
 RETURNS boolean AS $$
@@ -221,6 +247,8 @@ RETURNS boolean AS $$
         'column ' || quote_ident($1) || '.' || quote_ident($2) || '.'
         || quote_ident($3) || ' should have a default');
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_has_default(name, name, name) IS
+    'Assert that a qualified column has a default.';
 
 CREATE OR REPLACE FUNCTION col_has_default(name, name, text)
 RETURNS boolean AS $$
@@ -228,22 +256,30 @@ RETURNS boolean AS $$
         'col_has_default', _column_relation_oid($1), NULL, $1, $2, true, $3
     );
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_has_default(name, name, text) IS
+    'Assert that a visible column has a default.';
 
 CREATE OR REPLACE FUNCTION col_has_default(name, name)
 RETURNS boolean AS $$
     SELECT col_has_default($1, $2,
         'column ' || quote_ident($1) || '.' || quote_ident($2) || ' should have a default');
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_has_default(name, name) IS
+    'Assert that a visible column has a default.';
 
 CREATE OR REPLACE FUNCTION col_has_default_in(name, name, name, text)
 RETURNS boolean AS $$
     SELECT col_has_default($1::name, $2::name, $3::name, $4);
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_has_default_in(name, name, name, text) IS
+    'Unambiguously assert that a qualified column has a default.';
 
 CREATE OR REPLACE FUNCTION col_has_default_in(name, name, name)
 RETURNS boolean AS $$
     SELECT col_has_default($1::name, $2::name, $3::name);
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_has_default_in(name, name, name) IS
+    'Unambiguously assert that a qualified column has a default.';
 
 CREATE OR REPLACE FUNCTION col_hasnt_default(name, name, name, text)
 RETURNS boolean AS $$
@@ -251,6 +287,8 @@ RETURNS boolean AS $$
         'col_hasnt_default', _column_relation_oid($1, $2), $1, $2, $3, false, $4
     );
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_hasnt_default(name, name, name, text) IS
+    'Assert that a qualified column has no default.';
 
 CREATE OR REPLACE FUNCTION col_hasnt_default(name, name, name)
 RETURNS boolean AS $$
@@ -258,6 +296,8 @@ RETURNS boolean AS $$
         'column ' || quote_ident($1) || '.' || quote_ident($2) || '.'
         || quote_ident($3) || ' should not have a default');
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_hasnt_default(name, name, name) IS
+    'Assert that a qualified column has no default.';
 
 CREATE OR REPLACE FUNCTION col_hasnt_default(name, name, text)
 RETURNS boolean AS $$
@@ -265,6 +305,8 @@ RETURNS boolean AS $$
         'col_hasnt_default', _column_relation_oid($1), NULL, $1, $2, false, $3
     );
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_hasnt_default(name, name, text) IS
+    'Assert that a visible column has no default.';
 
 CREATE OR REPLACE FUNCTION col_hasnt_default(name, name)
 RETURNS boolean AS $$
@@ -272,16 +314,22 @@ RETURNS boolean AS $$
         'column ' || quote_ident($1) || '.' || quote_ident($2)
         || ' should not have a default');
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_hasnt_default(name, name) IS
+    'Assert that a visible column has no default.';
 
 CREATE OR REPLACE FUNCTION col_hasnt_default_in(name, name, name, text)
 RETURNS boolean AS $$
     SELECT col_hasnt_default($1::name, $2::name, $3::name, $4);
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_hasnt_default_in(name, name, name, text) IS
+    'Unambiguously assert that a qualified column has no default.';
 
 CREATE OR REPLACE FUNCTION col_hasnt_default_in(name, name, name)
 RETURNS boolean AS $$
     SELECT col_hasnt_default($1::name, $2::name, $3::name);
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_hasnt_default_in(name, name, name) IS
+    'Unambiguously assert that a qualified column has no default.';
 
 CREATE OR REPLACE FUNCTION _normalise_type(type_name text)
 RETURNS text AS $$
@@ -335,6 +383,8 @@ CREATE OR REPLACE FUNCTION col_type_is(name, name, name, text, text)
 RETURNS boolean AS $$
     SELECT _record_column_type(_column_relation_oid($1, $2), $1, $2, $3, $4, $5);
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_type_is(name, name, name, text, text) IS
+    'Assert the PostgreSQL type of a qualified column.';
 
 CREATE OR REPLACE FUNCTION col_type_is(name, name, name, text)
 RETURNS boolean AS $$
@@ -342,11 +392,15 @@ RETURNS boolean AS $$
         'column ' || quote_ident($1) || '.' || quote_ident($2) || '.'
         || quote_ident($3) || ' should have type ' || $4);
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_type_is(name, name, name, text) IS
+    'Assert the PostgreSQL type of a qualified column.';
 
 CREATE OR REPLACE FUNCTION col_type_is(name, name, text, text)
 RETURNS boolean AS $$
     SELECT _record_column_type(_column_relation_oid($1), NULL, $1, $2, $3, $4);
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_type_is(name, name, text, text) IS
+    'Assert the PostgreSQL type of a visible column.';
 
 CREATE OR REPLACE FUNCTION col_type_is(name, name, text)
 RETURNS boolean AS $$
@@ -354,16 +408,22 @@ RETURNS boolean AS $$
         'column ' || quote_ident($1) || '.' || quote_ident($2)
         || ' should have type ' || $3);
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_type_is(name, name, text) IS
+    'Assert the PostgreSQL type of a visible column.';
 
 CREATE OR REPLACE FUNCTION col_type_is_in(name, name, name, text, text)
 RETURNS boolean AS $$
     SELECT col_type_is($1::name, $2::name, $3::name, $4, $5);
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_type_is_in(name, name, name, text, text) IS
+    'Unambiguously assert the PostgreSQL type of a qualified column.';
 
 CREATE OR REPLACE FUNCTION col_type_is_in(name, name, name, text)
 RETURNS boolean AS $$
     SELECT col_type_is($1::name, $2::name, $3::name, $4);
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_type_is_in(name, name, name, text) IS
+    'Unambiguously assert the PostgreSQL type of a qualified column.';
 
 CREATE OR REPLACE FUNCTION _record_column_default(
     relation_oid oid,
@@ -440,65 +500,40 @@ CREATE OR REPLACE FUNCTION col_default_is(name, name, name, anyelement, text)
 RETURNS boolean AS $$
     SELECT _record_column_default(_column_relation_oid($1, $2), $1, $2, $3, $4, $5);
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_default_is(name, name, name, anyelement, text) IS
+    'Assert the value of a qualified column default.';
 
 CREATE OR REPLACE FUNCTION col_default_is(name, name, name, text, text)
 RETURNS boolean AS $$
     SELECT _record_column_default(_column_relation_oid($1, $2), $1, $2, $3, $4, $5);
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_default_is(name, name, name, text, text) IS
+    'Assert the value of a qualified column default supplied as text.';
 
 CREATE OR REPLACE FUNCTION col_default_is(name, name, anyelement, text)
 RETURNS boolean AS $$
     SELECT _record_column_default(_column_relation_oid($1), NULL, $1, $2, $3, $4);
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_default_is(name, name, anyelement, text) IS
+    'Assert the value of a visible column default.';
 
 CREATE OR REPLACE FUNCTION col_default_is(name, name, text, text)
 RETURNS boolean AS $$
     SELECT _record_column_default(_column_relation_oid($1), NULL, $1, $2, $3, $4);
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_default_is(name, name, text, text) IS
+    'Assert the value of a visible column default supplied as text.';
 
 CREATE OR REPLACE FUNCTION col_default_is_in(name, name, name, anyelement, text)
 RETURNS boolean AS $$
     SELECT col_default_is($1::name, $2::name, $3::name, $4, $5);
 $$ LANGUAGE sql;
+COMMENT ON FUNCTION col_default_is_in(name, name, name, anyelement, text) IS
+    'Unambiguously assert the value of a qualified column default.';
 
 CREATE OR REPLACE FUNCTION col_default_is_in(name, name, name, text, text)
 RETURNS boolean AS $$
     SELECT col_default_is($1::name, $2::name, $3::name, $4, $5);
 $$ LANGUAGE sql;
-
-COMMENT ON FUNCTION col_not_null(name, name, name, text) IS 'Assert that a qualified column is NOT NULL.';
-COMMENT ON FUNCTION col_not_null(name, name, name) IS 'Assert that a qualified column is NOT NULL.';
-COMMENT ON FUNCTION col_not_null(name, name, text) IS 'Assert that a visible column is NOT NULL.';
-COMMENT ON FUNCTION col_not_null(name, name) IS 'Assert that a visible column is NOT NULL.';
-COMMENT ON FUNCTION col_not_null_in(name, name, name, text) IS 'Unambiguously assert that a qualified column is NOT NULL.';
-COMMENT ON FUNCTION col_not_null_in(name, name, name) IS 'Unambiguously assert that a qualified column is NOT NULL.';
-COMMENT ON FUNCTION col_is_null(name, name, name, text) IS 'Assert that a qualified column allows NULL.';
-COMMENT ON FUNCTION col_is_null(name, name, name) IS 'Assert that a qualified column allows NULL.';
-COMMENT ON FUNCTION col_is_null(name, name, text) IS 'Assert that a visible column allows NULL.';
-COMMENT ON FUNCTION col_is_null(name, name) IS 'Assert that a visible column allows NULL.';
-COMMENT ON FUNCTION col_is_null_in(name, name, name, text) IS 'Unambiguously assert that a qualified column allows NULL.';
-COMMENT ON FUNCTION col_is_null_in(name, name, name) IS 'Unambiguously assert that a qualified column allows NULL.';
-COMMENT ON FUNCTION col_has_default(name, name, name, text) IS 'Assert that a qualified column has a default.';
-COMMENT ON FUNCTION col_has_default(name, name, name) IS 'Assert that a qualified column has a default.';
-COMMENT ON FUNCTION col_has_default(name, name, text) IS 'Assert that a visible column has a default.';
-COMMENT ON FUNCTION col_has_default(name, name) IS 'Assert that a visible column has a default.';
-COMMENT ON FUNCTION col_has_default_in(name, name, name, text) IS 'Unambiguously assert that a qualified column has a default.';
-COMMENT ON FUNCTION col_has_default_in(name, name, name) IS 'Unambiguously assert that a qualified column has a default.';
-COMMENT ON FUNCTION col_hasnt_default(name, name, name, text) IS 'Assert that a qualified column has no default.';
-COMMENT ON FUNCTION col_hasnt_default(name, name, name) IS 'Assert that a qualified column has no default.';
-COMMENT ON FUNCTION col_hasnt_default(name, name, text) IS 'Assert that a visible column has no default.';
-COMMENT ON FUNCTION col_hasnt_default(name, name) IS 'Assert that a visible column has no default.';
-COMMENT ON FUNCTION col_hasnt_default_in(name, name, name, text) IS 'Unambiguously assert that a qualified column has no default.';
-COMMENT ON FUNCTION col_hasnt_default_in(name, name, name) IS 'Unambiguously assert that a qualified column has no default.';
-COMMENT ON FUNCTION col_type_is(name, name, name, text, text) IS 'Assert the PostgreSQL type of a qualified column.';
-COMMENT ON FUNCTION col_type_is(name, name, name, text) IS 'Assert the PostgreSQL type of a qualified column.';
-COMMENT ON FUNCTION col_type_is(name, name, text, text) IS 'Assert the PostgreSQL type of a visible column.';
-COMMENT ON FUNCTION col_type_is(name, name, text) IS 'Assert the PostgreSQL type of a visible column.';
-COMMENT ON FUNCTION col_type_is_in(name, name, name, text, text) IS 'Unambiguously assert the PostgreSQL type of a qualified column.';
-COMMENT ON FUNCTION col_type_is_in(name, name, name, text) IS 'Unambiguously assert the PostgreSQL type of a qualified column.';
-COMMENT ON FUNCTION col_default_is(name, name, name, anyelement, text) IS 'Assert the value of a qualified column default.';
-COMMENT ON FUNCTION col_default_is(name, name, name, text, text) IS 'Assert the value of a qualified column default supplied as text.';
-COMMENT ON FUNCTION col_default_is(name, name, anyelement, text) IS 'Assert the value of a visible column default.';
-COMMENT ON FUNCTION col_default_is(name, name, text, text) IS 'Assert the value of a visible column default supplied as text.';
-COMMENT ON FUNCTION col_default_is_in(name, name, name, anyelement, text) IS 'Unambiguously assert the value of a qualified column default.';
-COMMENT ON FUNCTION col_default_is_in(name, name, name, text, text) IS 'Unambiguously assert the value of a qualified column default supplied as text.';
+COMMENT ON FUNCTION col_default_is_in(name, name, name, text, text) IS
+    'Unambiguously assert the value of a qualified column default supplied as text.';
