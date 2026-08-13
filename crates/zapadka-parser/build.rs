@@ -14,10 +14,14 @@ use std::path::{Path, PathBuf};
 const VENDOR_REL: &str = "../../third_party/libpg_query";
 
 fn main() {
+    // Keep Cargo's ordinary absolute path. On Windows, canonicalize() adds a
+    // `\\?\` prefix that MSVC's cl.exe does not accept for C source paths.
     let vendor = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(VENDOR_REL);
-    let vendor = vendor
-        .canonicalize()
-        .unwrap_or_else(|e| panic!("vendored libpg_query missing at {}: {e}", vendor.display()));
+    assert!(
+        vendor.is_dir(),
+        "vendored libpg_query missing at {}",
+        vendor.display()
+    );
 
     let mut build = cc::Build::new();
     build
