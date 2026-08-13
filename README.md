@@ -298,10 +298,25 @@ repeatable migrations, callbacks, and multi-project registries.
 ## Development
 
 ```sh
-cargo test --workspace     # unit and integration tests; needs Docker
-cargo xtask quality        # the full static-analysis battery
-cargo xtask metrics        # complexity report
+just test          # every test, then clean up the containers it started
+just test-db       # the PostgreSQL integration tests only
+just ci            # everything CI runs, in CI's order
+just containers    # show the containers this harness owns
+just clean         # remove them
 ```
+
+`cargo test --workspace` works too and needs nothing installed. The difference
+is cleanup: the harness holds its PostgreSQL container in a `static`, and Rust
+does not drop statics at process exit, so a bare `cargo test` leaves its
+container behind. The harness sweeps leftovers when it *next* starts, which
+bounds the leak to one container; `just test` removes it when the run finishes,
+pass or fail.
+
+Anything that removes a container requires two independent conditions — the
+`dev.zapadka.test-harness` label *and* the `zapadka-testharness-` name prefix.
+Both destructive bugs found in this project came from matching on a single
+identifier that turned out not to be unique, so `docker rm` is never handed a
+filter that could mean somebody else's database.
 
 ## Licence
 

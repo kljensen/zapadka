@@ -53,6 +53,16 @@ const IMAGE_DIGEST: &str = "9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e67
 /// somebody else's running database is a high price for tidiness.
 const OWNER_LABEL: &str = "dev.zapadka.test-harness";
 
+/// The prefix every container this harness starts is named with.
+///
+/// Names are not left to testcontainers' random word pairs. Two independent
+/// conditions must hold before anything is removed -- this prefix *and* the
+/// label above -- because every destructive bug in this project so far came
+/// from matching on a single identifier that turned out not to be unique. A
+/// name nobody else would choose is cheap; explaining a deleted database is
+/// not.
+const CONTAINER_PREFIX: &str = "zapadka-testharness-";
+
 /// The PostgreSQL release the digest above corresponds to, asserted at run time
 /// so that a digest bump to a different major version cannot pass unnoticed.
 const EXPECTED_MAJOR: &str = "18";
@@ -69,6 +79,19 @@ struct Postgres {
     container: Container<GenericImage>,
     host: String,
     port: u16,
+}
+
+/// A name unique to this test process.
+///
+/// Unique so two test binaries running at once cannot collide on the name, and
+/// so a sweep started by one cannot remove the other's container -- the process
+/// id and start time together are enough, and neither needs a random source.
+fn container_name() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_nanos())
+        .unwrap_or_default();
+    format!("{CONTAINER_PREFIX}{}-{nanos}", std::process::id())
 }
 
 /// Removes containers this harness leaked on previous runs.
@@ -99,7 +122,16 @@ fn sweep_leaked_containers() {
     }
 
     let listed = std::process::Command::new("docker")
-        .args(["ps", "-aq", "--filter", &format!("label={OWNER_LABEL}")])
+        .args([
+            "ps",
+            "-aq",
+            "--filter",
+            &format!("label={OWNER_LABEL}"),
+            // Docker's name filter is a substring match; the anchor here is
+            // that nobody else would choose this prefix.
+            "--filter",
+            &format!("name={CONTAINER_PREFIX}"),
+        ])
         .output();
     let Ok(listed) = listed else {
         // No Docker is a problem the container start will report far better
@@ -140,6 +172,7 @@ fn postgres() -> &'static Postgres {
             // Applied last: this returns a ContainerRequest, past which the
             // image-level builders are no longer available.
             .with_label(OWNER_LABEL, "1")
+            .with_container_name(container_name())
             .start()
             .unwrap_or_else(|error| {
                 panic!(
