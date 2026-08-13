@@ -14,7 +14,7 @@
 //! The assertions carry pgTAP's names and argument types, because it is a good
 //! API that people already know. They are not pgTAP: they record typed rows and
 //! return booleans, and no TAP is produced anywhere. See
-//! `docs/adr/0006-own-a-native-sql-assertion-library.md`.
+//! `docs/adr/0004-separate-deployment-verification-from-database-tests.md`.
 //!
 //! Deploy targets never see any of this. That is the whole point of ADR-0004:
 //! production databases should not have to carry a test framework in order for
@@ -43,7 +43,7 @@ pub const TEST_LIBRARY_VERSION: &str = "1";
 /// Zapadka's own assertion library.
 ///
 /// See
-/// `docs/adr/0006-own-a-native-sql-assertion-library.md`.
+/// `docs/adr/0004-separate-deployment-verification-from-database-tests.md`.
 /// The library, in installation order: the core defines `_record`, which every
 /// assertion in the later files calls.
 const NATIVE_SOURCE: &[(&str, &str)] = &[

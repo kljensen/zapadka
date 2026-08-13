@@ -70,13 +70,16 @@ SELECT 1 / (CASE WHEN (SELECT count(*) FROM app.orders)
 
 **Tests are SQL, and so are their results.** `zapadka test` ships a SQL
 assertion library that installs into a reserved schema on a test target — no
-extension, no `CREATE EXTENSION`, nothing on the server's filesystem. It carries
-pgTAP's names and argument types, because that is a good API a lot of people
-already know:
+extension, no `CREATE EXTENSION`, nothing on the server's filesystem.
+
+The API is **pgTAP-inspired and deliberately divergent**. The names and
+arguments are pgTAP's, because that is a good API a lot of people already know,
+and many pgTAP files port unchanged. It is not a compatibility contract: where
+pgTAP is showing its age, this improves on it. The differences are listed below.
 
 ```sql
-SELECT has_table('app', 'orders');
-SELECT col_is_pk('app', 'orders', 'id', 'id is the primary key');
+SELECT has_table_in('app', 'orders');
+SELECT col_is_pk_in('app', 'orders', 'id');
 SELECT set_eq(
     'SELECT status FROM app.orders',
     ARRAY['paid', 'pending'],
@@ -98,6 +101,16 @@ Assertions return `boolean`, so a file stays readable in `psql`. `plan()` and
 `finish()` are supported but never required: `1..N` existed so a *text* consumer
 could spot a truncated stream, and there is no text consumer. A declared plan is
 enforced. A test file may return whatever it likes; only its assertions count.
+
+**Where it diverges from pgTAP, and why:**
+
+| Difference | Reason |
+|---|---|
+| `throws_ok`'s third argument is the description | pgTAP makes it the expected *message* whenever the second argument happens to be five bytes long. An argument that changes meaning by the length of another argument is a trap; it caught this library's author, then caught the test written to check it. `throws_sqlstate(sql, code, description)` infers nothing. A file in pgTAP's order is **refused**, not reinterpreted. |
+| `has_table_in('app', 'orders')` and friends | `has_table('app', 'orders')` does not mean (schema, table): two bare literals are `unknown`, PostgreSQL prefers `text`, so it checks a table named `app`. pgTAP has the same hazard. The `_in` forms always mean (schema, object). The pgTAP spellings still work. |
+| `has_view` counts materialised views | A materialised view exists. pgTAP checks `relkind = 'v'` only. |
+| No `runtests`, `do_tap`, `check_test`, `pgtap_version` | TAP harness machinery with nothing to harness. Omitted rather than stubbed, so a file using them fails loudly. |
+| A test file must not open its own transaction | The runner owns it, so no test can escape rollback. Drop the `begin;` / `rollback;` a pgTAP file carries. |
 
 **Database tests are isolated, with one documented exception.** Each test file
 runs on a fresh connection in a transaction Zapadka always rolls back, so no

@@ -2,7 +2,7 @@
 --
 -- Installed into the reserved test schema. Every assertion records a typed row
 -- and returns a boolean; nothing here builds, emits, or parses TAP. See
--- docs/adr/0006-own-a-native-sql-assertion-library.md.
+-- docs/adr/0004-separate-deployment-verification-from-database-tests.md.
 --
 -- The public API deliberately matches pgTAP's names and argument types. It is a
 -- good API that people already know, and matching it means a test file is not a
