@@ -1151,6 +1151,94 @@ SELECT skip('skipped on purpose', 1);
 SELECT finish();
 ";
 
+/// Kills the backend running a nontransactional migration, mid-statement.
+///
+/// The recovery machinery was previously tested by inserting the attempt row by
+/// hand, which validates the state machine *after* the crash boundary while
+/// assuming the boundary itself behaves. This makes the crash real: a
+/// `CREATE INDEX CONCURRENTLY` on enough rows to take a moment, terminated from
+/// another connection while it runs.
+#[test]
+fn a_backend_killed_mid_statement_leaves_the_target_blocked() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint, total numeric);\n\
+         INSERT INTO public.orders \
+           SELECT g, g * 1.5 FROM generate_series(1, 400000) AS g;",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    let blocked = project.nontransactional_migration(
+        "add-index",
+        &[],
+        "CREATE INDEX CONCURRENTLY orders_total_idx ON public.orders (total);",
+    );
+
+    // Terminate whatever backend is building the index, as soon as one appears.
+    let uri = db.uri();
+    let killer = std::thread::spawn(move || {
+        for _ in 0..600 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let killed = harness::try_psql(
+                &uri,
+                "SELECT count(*) FROM (SELECT pg_terminate_backend(pid) \
+                   FROM pg_stat_activity \
+                  WHERE query LIKE 'CREATE INDEX CONCURRENTLY%' \
+                    AND pid <> pg_backend_pid()) t",
+            );
+            if matches!(killed.as_deref(), Ok(count) if count.trim() != "0") {
+                return true;
+            }
+        }
+        false
+    });
+
+    let report = project.report(&["deploy", "--uri", &db.uri()]);
+    let did_kill = killer.join().unwrap_or(false);
+
+    if !did_kill {
+        // The index finished before the killer saw it. Not a failure of the
+        // code under test, and asserting on a race we lost would make this
+        // test flaky rather than meaningful.
+        report.assert_success();
+        return;
+    }
+
+    // The statement was interrupted, so its outcome is genuinely unknown.
+    assert_ne!(
+        report.code(),
+        0,
+        "an interrupted deploy must not report success"
+    );
+    assert_eq!(
+        db.scalar("SELECT count(*) FROM zapadka.nontransactional_attempts"),
+        "1",
+        "the attempt recorded before the statement must survive the crash"
+    );
+
+    // And the target is blocked until a person resolves it -- which is the
+    // whole point of writing the attempt down first.
+    let status = project.report(&["status", "--uri", &db.uri()]);
+    status.assert_success();
+    assert!(status.diagnostic_codes().contains(&"target.blocked"));
+    assert_eq!(status.slugs_with_status("blocked"), ["add-index"]);
+
+    project
+        .report(&[
+            "resolve",
+            &blocked.to_string(),
+            "--not-applied",
+            "--uri",
+            &db.uri(),
+        ])
+        .assert_success();
+}
+
 #[test]
 fn a_schema_left_by_the_pgtap_era_is_replaced_rather_than_refused() {
     let db = database();

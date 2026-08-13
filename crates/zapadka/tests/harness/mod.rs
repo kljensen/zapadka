@@ -272,7 +272,7 @@ fn psql(uri: &str, sql: &str) -> String {
 /// Uses the container's client rather than a Rust one so that the harness has
 /// no opinion about connection handling; whatever it observes is what an
 /// ordinary client would see.
-fn try_psql(uri: &str, sql: &str) -> Result<String, String> {
+pub fn try_psql(uri: &str, sql: &str) -> Result<String, String> {
     let container_uri = uri.replace(
         &format!("@{}:{}", postgres().host, postgres().port),
         "@127.0.0.1:5432",
