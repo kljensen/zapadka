@@ -37,6 +37,7 @@ fn main() {
         .opt_level(2);
 
     if build.get_compiler().is_like_msvc() {
+        build.include(vendor.join("src/postgres/include/port/win32_msvc"));
         build.include(vendor.join("src/postgres/include/port/win32"));
     }
 
