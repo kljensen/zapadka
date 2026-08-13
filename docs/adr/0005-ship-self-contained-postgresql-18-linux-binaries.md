@@ -1,4 +1,4 @@
-# ADR-0005: Ship self-contained PostgreSQL 18 Linux binaries
+# ADR-0005: Ship self-contained PostgreSQL 18 binaries
 
 Date: 2026-07-18
 
@@ -15,9 +15,12 @@ Its safety checks must match the PostgreSQL version it supports.
 ## Decision
 
 Zapadka will be a Rust application targeting PostgreSQL 18 and distributed as
-static musl Linux binaries for x86_64 and aarch64. It will use native Rust TLS,
-embed the pinned PostgreSQL-derived parser and Zapadka's SQL assertion library,
-and avoid runtime plug-ins and dynamically linked database client libraries.
+static musl Linux binaries and native macOS binaries for x86_64 and aarch64,
+plus a native x86_64 Windows binary. It will use native Rust TLS, embed the
+pinned PostgreSQL-derived parser and Zapadka's SQL assertion library, and avoid
+runtime plug-ins and dynamically linked database client libraries. macOS and
+Windows binaries may link their operating systems' libraries; they require no
+separately installed database or TLS client library.
 The pinned pgTAP source is retained for attribution and conformance reference,
 not compiled or installed; see ADR-0004.
 

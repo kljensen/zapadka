@@ -125,9 +125,181 @@ jobs:
             target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}.vendored.md
           if-no-files-found: error
 
+  macos-binary:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            runner: macos-14
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup target add "${{ matrix.target }}"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Build on the matching Apple architecture. This keeps Apple's SDK and
+      # linker native and also compiles the vendored PostgreSQL parser with the
+      # same Clang toolchain the released executable uses.
+      - name: Build
+        run: cargo build --release --locked --target "${{ matrix.target }}" -p zapadka
+
+      - name: Inspect linkage and smoke test
+        run: |
+          binary="target/${{ matrix.target }}/release/zapadka"
+          file "$binary"
+          otool -L "$binary"
+          "$binary" --version
+
+      # Mach-O output should be every bit as reproducible as ELF output. Build
+      # once more from an empty target tree so a timestamp, hostname, or path
+      # cannot enter a release unnoticed.
+      - name: Prove the build is reproducible
+        run: |
+          binary="target/${{ matrix.target }}/release/zapadka"
+          first="$(shasum -a 256 "$binary" | cut -d' ' -f1)"
+          mv target target-first-build
+          cargo build --release --locked --target "${{ matrix.target }}" -p zapadka
+          second="$(shasum -a 256 "$binary" | cut -d' ' -f1)"
+          rm -rf target
+          mv target-first-build target
+          if [ "$first" != "$second" ]; then
+            echo "::error::the build is not reproducible: $first != $second"
+            exit 1
+          fi
+          echo "two independent builds produced $first"
+
+      - name: Generate an SBOM
+        run: |
+          cargo install cargo-cyclonedx --locked
+          cargo cyclonedx --format json --spec-version 1.5 --target "${{ matrix.target }}"
+          sbom="$(find . -name 'zapadka*.cdx.json' -not -path './target/*' | head -1)"
+          test -n "$sbom" || { echo "::error::no SBOM was produced"; exit 1; }
+          mv "$sbom" "target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}.cdx.json"
+
+      - name: Record vendored source provenance
+        run: |
+          {
+            echo "# Vendored source provenance"
+            echo
+            for tree in third_party/*/; do
+              echo "## $(basename "$tree")"
+              grep -E '^(upstream|release|revision|license|archive_sha256) ' "$tree/PROVENANCE.toml" || true
+              grep -E '^installed = ' "$tree/PROVENANCE.toml" || echo "installed = true"
+              echo
+            done
+          } > "target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}.vendored.md"
+
+      - name: Checksum
+        run: |
+          cd "target/${{ matrix.target }}/release"
+          mv zapadka "zapadka-${{ matrix.target }}"
+          shasum -a 256 "zapadka-${{ matrix.target }}" > "zapadka-${{ matrix.target }}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zapadka-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}
+            target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}.sha256
+            target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}.cdx.json
+            target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}.vendored.md
+          if-no-files-found: error
+
+  windows-binary:
+    name: Build x86_64-pc-windows-msvc
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustup target add x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc
+
+      - name: Build and smoke test
+        run: |
+          cargo build --release --locked --target x86_64-pc-windows-msvc -p zapadka
+          target/x86_64-pc-windows-msvc/release/zapadka.exe --version
+
+      - name: Prove the build is reproducible
+        run: |
+          binary=target/x86_64-pc-windows-msvc/release/zapadka.exe
+          first="$(sha256sum "$binary" | cut -d' ' -f1)"
+          mv target target-first-build
+          cargo build --release --locked --target x86_64-pc-windows-msvc -p zapadka
+          second="$(sha256sum "$binary" | cut -d' ' -f1)"
+          rm -rf target
+          mv target-first-build target
+          if [ "$first" != "$second" ]; then
+            echo "::error::the build is not reproducible: $first != $second"
+            exit 1
+          fi
+          echo "two independent builds produced $first"
+
+      - name: Generate an SBOM
+        run: |
+          cargo install cargo-cyclonedx --locked
+          cargo cyclonedx --format json --spec-version 1.5 --target x86_64-pc-windows-msvc
+          sbom="$(find . -name 'zapadka*.cdx.json' -not -path './target/*' | head -1)"
+          test -n "$sbom" || { echo "::error::no SBOM was produced"; exit 1; }
+          mv "$sbom" target/x86_64-pc-windows-msvc/release/zapadka-x86_64-pc-windows-msvc.cdx.json
+
+      - name: Record vendored source provenance
+        run: |
+          {
+            echo "# Vendored source provenance"
+            echo
+            for tree in third_party/*/; do
+              echo "## $(basename "$tree")"
+              grep -E '^(upstream|release|revision|license|archive_sha256) ' "$tree/PROVENANCE.toml" || true
+              grep -E '^installed = ' "$tree/PROVENANCE.toml" || echo "installed = true"
+              echo
+            done
+          } > target/x86_64-pc-windows-msvc/release/zapadka-x86_64-pc-windows-msvc.vendored.md
+
+      - name: Checksum
+        run: |
+          cd target/x86_64-pc-windows-msvc/release
+          mv zapadka.exe zapadka-x86_64-pc-windows-msvc.exe
+          sha256sum zapadka-x86_64-pc-windows-msvc.exe > zapadka-x86_64-pc-windows-msvc.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zapadka-x86_64-pc-windows-msvc
+          path: |
+            target/x86_64-pc-windows-msvc/release/zapadka-x86_64-pc-windows-msvc.exe
+            target/x86_64-pc-windows-msvc/release/zapadka-x86_64-pc-windows-msvc.sha256
+            target/x86_64-pc-windows-msvc/release/zapadka-x86_64-pc-windows-msvc.cdx.json
+            target/x86_64-pc-windows-msvc/release/zapadka-x86_64-pc-windows-msvc.vendored.md
+          if-no-files-found: error
+
   publish:
     name: Publish the release
-    needs: binary
+    needs: [binary, macos-binary, windows-binary]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:

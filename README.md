@@ -244,8 +244,9 @@ Zapadka does not deploy as a superuser, and neither should you.
 - PostgreSQL 18 or newer. Zapadka analyses migrations with the PostgreSQL 18
   grammar, so it cannot make truthful safety decisions about an older server and
   refuses to try.
-- Linux x86_64 or aarch64 for released binaries. Building from source works
-  anywhere Rust and a C compiler do.
+- Linux x86_64 or aarch64, macOS Intel or Apple Silicon, and Windows x86_64 for
+  released binaries. Building from source works anywhere Rust and a C compiler
+  do.
 
 ## Nontransactional migrations
 

@@ -1,7 +1,8 @@
 # Zapadka
 
-A PostgreSQL 18 migration and database-testing tool, shipped as a static Linux
-binary with no dynamic dependencies at all.
+A PostgreSQL 18 migration and database-testing tool, shipped as static Linux
+binaries, native macOS binaries for Intel and Apple Silicon, and a native
+Windows x86_64 binary.
 
 ## Install
 
@@ -13,11 +14,12 @@ chmod +x zapadka-x86_64-unknown-linux-musl
 sudo mv zapadka-x86_64-unknown-linux-musl /usr/local/bin/zapadka
 ```
 
-No libpq, no OpenSSL, no PostgreSQL client installation. Every release is built
-inside a container pinned by image digest and verified to have no ELF `NEEDED`
-entries, so "static" is proven rather than intended. Each binary ships with its
-SHA-256, a CycloneDX SBOM, and provenance for vendored third-party sources that
-distinguishes compiled components from attribution-only references.
+No libpq, no OpenSSL, no PostgreSQL client installation. Linux releases are
+built inside containers pinned by image digest and verified to have no ELF
+`NEEDED` entries. macOS and Windows releases are built natively on their target
+operating systems. Each binary ships with its SHA-256, a CycloneDX SBOM, and
+provenance for vendored third-party sources that distinguishes compiled
+components from attribution-only references.
 
 ## What it does
 
