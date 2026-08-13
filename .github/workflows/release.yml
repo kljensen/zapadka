@@ -90,17 +90,18 @@ jobs:
           test -n "$sbom" || { echo "::error::no SBOM was produced"; exit 1; }
           mv "$sbom" "target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}.cdx.json"
 
-      # The vendored parser and pgTAP are compiled in rather than resolved as
-      # crates, so they do not appear in the dependency graph. Recording them
-      # alongside the SBOM keeps the artifact list honest.
-      - name: Record vendored components
+      # Vendored sources do not appear in Cargo's dependency graph. Some are
+      # compiled into the binary; others are retained only for attribution and
+      # conformance. Preserve that distinction alongside the SBOM.
+      - name: Record vendored source provenance
         run: |
           {
-            echo "# Components vendored into this binary, not resolved as crates."
+            echo "# Vendored source provenance"
             echo
             for tree in third_party/*/; do
               echo "## $(basename "$tree")"
               grep -E '^(upstream|release|revision|license|archive_sha256) ' "$tree/PROVENANCE.toml" || true
+              grep -E '^installed = ' "$tree/PROVENANCE.toml" || echo "installed = true"
               echo
             done
           } > target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}.vendored.md

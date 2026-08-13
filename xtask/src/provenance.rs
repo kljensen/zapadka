@@ -1,10 +1,9 @@
 //! Verifying that vendored third-party files are exactly what upstream shipped.
 //!
-//! Zapadka compiles a copy of PostgreSQL's parser into its binary and will
-//! eventually ship a copy of pgTAP. Both are safety-relevant: the parser
-//! decides whether a migration is allowed to run, and pgTAP decides whether a
-//! test passed. A local edit to either — deliberate or accidental — changes
-//! what Zapadka promises while still looking like upstream code in review.
+//! Zapadka compiles a copy of PostgreSQL's parser into its binary and retains a
+//! pinned pgTAP subset as attribution and a conformance reference. A local edit
+//! to either — deliberate or accidental — changes compiled behavior or the
+//! reference against which Zapadka's assertion behavior is reviewed.
 //!
 //! So every vendored file's hash is recorded, and this check re-derives them.
 //! It fails on a modified file, a missing file, and equally on an *unrecorded*

@@ -3,7 +3,7 @@
 # Zapadka no longer installs pgTAP. It ships its own SQL assertion library,
 # which carries pgTAP's public names and argument types but records typed rows
 # instead of producing TAP -- see
-# docs/adr/0006-own-a-native-sql-assertion-library.md.
+# docs/adr/0004-separate-deployment-verification-from-database-tests.md.
 #
 # This tree is kept for three reasons, none of which involve executing it:
 #
@@ -38,20 +38,16 @@ license = "PostgreSQL"
 license_file = "README.md"
 
 purpose = """
-Provides the SQL assertion API `zapadka test` runs. ADR-0004 requires the test
-framework to be embedded in the binary rather than installed separately, so that
-a test target needs no extension and a deploy target needs no test framework at
-all.
+Retained as attribution for Zapadka's derivative SQL assertion API and as the
+pinned conformance reference used when reviewing its behavior. Zapadka neither
+compiles nor installs this source; see ADR-0004.
 """
 
 subset = """
-sql/pgtap.sql.in is the only file Zapadka executes. README.md carries the
+sql/pgtap.sql.in is the implementation reference. README.md carries the
 copyright and licence notice, META.json carries the author's own licence
-declaration, and pgtap.control records the upstream version. Everything else in
-the release -- the pg_regress suite, documentation, per-version upgrade scripts,
-and compatibility patches for PostgreSQL 9.x -- is not used: Zapadka installs
-one version into one schema on PostgreSQL 18 and never upgrades an existing
-installation in place.
+declaration, and pgtap.control records the upstream version. None of these files
+is compiled or executed by Zapadka.
 """
 
 # Recorded because it is a real ambiguity a reader will otherwise trip over.

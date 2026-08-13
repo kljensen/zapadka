@@ -131,9 +131,10 @@ out:
 
 ## Fixture provenance
 
-Zapadka compiles a copy of PostgreSQL's parser into its binary and will ship a
-copy of pgTAP. Both are safety-relevant: the parser decides whether a migration
-may run, and pgTAP decides whether a test passed.
+Zapadka compiles a copy of PostgreSQL's parser into its binary and retains a
+pinned pgTAP subset as attribution and a conformance reference for its own SQL
+assertion library. The parser and the reference are both provenance-sensitive,
+but only the parser is compiled and only Zapadka's library executes.
 
 `cargo xtask verify-fixtures` re-hashes every vendored file and fails on a
 modified file, a missing file, or an **unrecorded** file — because a file nobody

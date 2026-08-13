@@ -195,7 +195,7 @@ pub struct AdvancedSequence {
 
 /// Reads the position of every sequence a test could move.
 ///
-/// System catalogs and the pgTAP schema are excluded.
+/// System catalogs and Zapadka's test-library schema are excluded.
 ///
 /// The registry schema is deliberately *not* excluded. It is configurable, and
 /// setting it to an application schema such as `public` is supported -- so

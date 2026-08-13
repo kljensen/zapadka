@@ -3,10 +3,6 @@
 //! Used sparingly, and only where an example-based test cannot cover the shape
 //! of the input space:
 //!
-//! - The **TAP parser** reads text produced by a database, which may be
-//!   truncated, interleaved, or malformed in ways nobody thought to write down.
-//!   The property that matters is that it always terminates with a classified
-//!   answer, never a panic.
 //! - The **dependency graph** decides the order migrations run in. Its
 //!   invariants — dependencies first, and the same plan every time — must hold
 //!   for every graph, not for the four in the unit tests.

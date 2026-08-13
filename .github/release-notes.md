@@ -16,8 +16,8 @@ sudo mv zapadka-x86_64-unknown-linux-musl /usr/local/bin/zapadka
 No libpq, no OpenSSL, no PostgreSQL client installation. Every release is built
 inside a container pinned by image digest and verified to have no ELF `NEEDED`
 entries, so "static" is proven rather than intended. Each binary ships with its
-SHA-256, a CycloneDX SBOM, and a list of the vendored third-party sources
-compiled into it.
+SHA-256, a CycloneDX SBOM, and provenance for vendored third-party sources that
+distinguishes compiled components from attribution-only references.
 
 ## What it does
 

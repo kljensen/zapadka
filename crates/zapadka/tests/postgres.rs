@@ -1265,7 +1265,7 @@ fn a_schema_left_by_the_pgtap_era_is_replaced_rather_than_refused() {
     // schema it had created itself as one it did not, and tell the operator to
     // drop it -- an upgrade that blocks on a lie.
     db.query(
-        "DROP SCHEMA IF EXISTS zapadka_test CASCADE;          CREATE SCHEMA zapadka_test;          CREATE TABLE zapadka_test.zapadka_pgtap (              singleton boolean PRIMARY KEY DEFAULT true,              pgtap_version text NOT NULL,              artifact_sha256 text NOT NULL,              zapadka_version text NOT NULL);          INSERT INTO zapadka_test.zapadka_pgtap (pgtap_version, artifact_sha256, zapadka_version)          VALUES ('1.3.4', repeat('a', 64), '0.2.0')",
+        "DROP SCHEMA IF EXISTS zapadka_test CASCADE;          CREATE SCHEMA zapadka_test;          COMMENT ON SCHEMA zapadka_test IS 'pgTAP 1.3.4, installed by Zapadka. Safe to drop; contains no application data.';          CREATE TABLE zapadka_test.zapadka_pgtap (              singleton boolean PRIMARY KEY DEFAULT true,              pgtap_version text NOT NULL,              artifact_sha256 text NOT NULL,              zapadka_version text NOT NULL,              installed_at timestamptz NOT NULL DEFAULT now());          INSERT INTO zapadka_test.zapadka_pgtap (pgtap_version, artifact_sha256, zapadka_version)          VALUES ('1.3.4', repeat('a', 64), '0.2.0')",
     );
 
     project.test_file("orders.sql", "SELECT ok(true, 'runs after the upgrade');");
@@ -1315,6 +1315,67 @@ fn a_schema_that_merely_shares_a_name_is_not_dropped() {
         db.scalar("SELECT whatever FROM zapadka_test.zapadka_pgtap"),
         "precious",
         "an unrelated schema must survive"
+    );
+}
+
+#[test]
+fn a_superset_of_the_legacy_marker_is_not_dropped() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    // All names from the old marker are present, but the extra column makes
+    // this somebody else's table. A subset check would authorize dropping the
+    // whole schema and destroy the value stored here.
+    db.query(
+        "DROP SCHEMA IF EXISTS zapadka_test CASCADE;          CREATE SCHEMA zapadka_test;          COMMENT ON SCHEMA zapadka_test IS 'pgTAP 1.3.4, installed by Zapadka. Safe to drop; contains no application data.';          CREATE TABLE zapadka_test.zapadka_pgtap (              singleton boolean PRIMARY KEY DEFAULT true,              pgtap_version text NOT NULL,              artifact_sha256 text NOT NULL,              zapadka_version text NOT NULL,              installed_at timestamptz NOT NULL DEFAULT now(),              application_value text NOT NULL);          INSERT INTO zapadka_test.zapadka_pgtap              (pgtap_version, artifact_sha256, zapadka_version, application_value)          VALUES ('1.3.4', repeat('a', 64), '0.2.0', 'precious');",
+    );
+
+    project.test_file("orders.sql", "SELECT ok(true, 'x');");
+    project
+        .report(&["test", "--uri", &db.uri()])
+        .assert_failed("registry.upgrade_failed", exit::REGISTRY);
+
+    assert_eq!(
+        db.scalar("SELECT application_value FROM zapadka_test.zapadka_pgtap"),
+        "precious",
+        "a marker superset must survive"
+    );
+}
+
+#[test]
+fn a_native_marker_name_without_the_installer_fingerprint_is_not_dropped() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    db.query(
+        "DROP SCHEMA IF EXISTS zapadka_test CASCADE;          CREATE SCHEMA zapadka_test;          CREATE TABLE zapadka_test.zapadka_testlib (              singleton boolean PRIMARY KEY DEFAULT true,              library_version text NOT NULL,              artifact_sha256 text NOT NULL,              zapadka_version text NOT NULL,              installed_at timestamptz NOT NULL DEFAULT now());          INSERT INTO zapadka_test.zapadka_testlib              (library_version, artifact_sha256, zapadka_version)          VALUES ('other', repeat('a', 64), 'other');          CREATE TABLE zapadka_test.application_data (value text);          INSERT INTO zapadka_test.application_data VALUES ('precious');",
+    );
+
+    project.test_file("orders.sql", "SELECT ok(true, 'x');");
+    project
+        .report(&["test", "--uri", &db.uri()])
+        .assert_failed("registry.upgrade_failed", exit::REGISTRY);
+
+    assert_eq!(
+        db.scalar("SELECT value FROM zapadka_test.application_data"),
+        "precious",
+        "an unrecognized native marker must not authorize replacement"
     );
 }
 

@@ -22,8 +22,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The TAP parser reads text produced by a database and the TOML parsers
-      # read files from a repository. Both are inputs Zapadka does not control.
+      # The TOML parsers read files from a repository, an input Zapadka does not
+      # control. Graph invariants have separate property tests in the main suite.
       - name: Fuzz
         run: |
           for target in config manifest; do

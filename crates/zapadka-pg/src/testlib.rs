@@ -113,54 +113,19 @@ pub async fn installed(client: &Client) -> Result<Installation> {
 
     let quoted = quote_identifier(TEST_SCHEMA);
 
-    // A target tested by an earlier Zapadka carries `zapadka_pgtap` instead.
-    // Without recognising it, the schema would look like one Zapadka did not
-    // create and the operator would be told to drop something Zapadka had put
-    // there itself.
-    //
-    // The shape is checked, not just the name. Classifying as legacy leads to
-    // `DROP SCHEMA ... CASCADE`, so a bare name match would let any unrelated
-    // schema that happened to contain a `zapadka_pgtap` relation be destroyed.
-    // A table with these four columns and a singleton row is Zapadka's;
-    // anything else is somebody's data.
-    let legacy: bool = client
-        .query_one(
-            "SELECT EXISTS ( \
-               SELECT 1 FROM pg_class c \
-                 JOIN pg_namespace n ON n.oid = c.relnamespace \
-                WHERE n.nspname = $1 \
-                  AND c.relname = 'zapadka_pgtap' \
-                  AND c.relkind = 'r' \
-                  AND (SELECT count(*) FROM pg_attribute a \
-                        WHERE a.attrelid = c.oid AND a.attnum > 0 \
-                          AND NOT a.attisdropped \
-                          AND a.attname IN ('singleton', 'pgtap_version', \
-                                            'artifact_sha256', 'zapadka_version')) = 4)",
-            &[&TEST_SCHEMA],
-        )
-        .await
-        .map_err(|error| registry_failed(error, "look for a previous installation"))?
-        .get(0);
-
-    // And it must actually hold the marker row. A table of the right shape but
-    // no singleton row was not written by Zapadka's installer.
-    let legacy = legacy
-        && client
-            .query_one(
-                &format!(
-                    "SELECT count(*) = 1 FROM {}.zapadka_pgtap WHERE singleton",
-                    quote_identifier(TEST_SCHEMA)
-                ),
-                &[],
-            )
-            .await
-            .map_err(|error| registry_failed(error, "read the previous installation marker"))?
-            .get::<_, bool>(0);
-    if legacy {
+    if is_legacy_installation(client).await? {
         return Ok(Installation::Stale {
             installed_version: "pgTAP".to_owned(),
             installed_sha256: String::new(),
         });
+    }
+
+    // A native marker is trusted only when the schema bears the comment written
+    // by our installer and the table has its complete typed layout. A relation
+    // with merely the expected name and readable columns is not enough evidence
+    // to authorize the destructive replacement of the whole schema.
+    if !has_native_fingerprint(client).await? {
+        return Err(unowned_test_schema());
     }
 
     let marker = match client
@@ -203,18 +168,100 @@ pub async fn installed(client: &Client) -> Result<Installation> {
         // A schema by that name that Zapadka did not create. Refusing is the
         // only safe answer: dropping and recreating it could destroy something
         // that has nothing to do with Zapadka.
-        None => Err(Error::new(
-            ErrorCode::RegistryUpgradeFailed,
-            format!("schema {TEST_SCHEMA} exists but was not created by Zapadka"),
-        )
-        .with_hint(format!(
-            "Zapadka reserves {TEST_SCHEMA} for its test framework; rename or drop the existing \
-             schema if it is not needed"
-        ))),
+        None => Err(unowned_test_schema()),
     }
 }
 
-/// Installs pgTAP into the test schema, replacing any previous installation.
+/// Recognizes only the complete installation fingerprint written by v0.2.0.
+async fn is_legacy_installation(client: &Client) -> Result<bool> {
+    // Classifying as legacy authorizes `DROP SCHEMA ... CASCADE`. A subset of
+    // marker columns is not enough: an unrelated superset table must be refused.
+    let shape: bool = client
+        .query_one(
+            "SELECT EXISTS ( \
+               SELECT 1 FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                WHERE n.nspname = $1 \
+                  AND c.relname = 'zapadka_pgtap' \
+                  AND c.relkind = 'r' \
+                  AND obj_description(n.oid, 'pg_namespace') = \
+                      'pgTAP 1.3.4, installed by Zapadka. Safe to drop; contains no application data.' \
+                  AND (SELECT array_agg(a.attname || ':' || \
+                                        format_type(a.atttypid, a.atttypmod) \
+                                        ORDER BY a.attnum) \
+                         FROM pg_attribute a \
+                        WHERE a.attrelid = c.oid AND a.attnum > 0 \
+                          AND NOT a.attisdropped) = \
+                      ARRAY['singleton:boolean', 'pgtap_version:text', \
+                            'artifact_sha256:text', 'zapadka_version:text', \
+                            'installed_at:timestamp with time zone'])",
+            &[&TEST_SCHEMA],
+        )
+        .await
+        .map_err(|error| registry_failed(error, "look for a previous installation"))?
+        .get(0);
+
+    if !shape {
+        return Ok(false);
+    }
+
+    client
+        .query_one(
+            &format!(
+                "SELECT count(*) = 1 FROM {}.zapadka_pgtap \
+                  WHERE singleton \
+                    AND pgtap_version = '1.3.4' \
+                    AND zapadka_version = '0.2.0' \
+                    AND artifact_sha256 ~ '^[0-9a-f]{{64}}$'",
+                quote_identifier(TEST_SCHEMA)
+            ),
+            &[],
+        )
+        .await
+        .map(|row| row.get(0))
+        .map_err(|error| registry_failed(error, "read the previous installation marker"))
+}
+
+/// Checks the non-row evidence written by the native library installer.
+async fn has_native_fingerprint(client: &Client) -> Result<bool> {
+    client
+        .query_one(
+            "SELECT EXISTS ( \
+               SELECT 1 FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                WHERE n.nspname = $1 \
+                  AND c.relname = 'zapadka_testlib' \
+                  AND c.relkind = 'r' \
+                  AND obj_description(n.oid, 'pg_namespace') LIKE \
+                      'Zapadka test assertions %, installed by Zapadka. Safe to drop; contains no application data.' \
+                  AND (SELECT array_agg(a.attname || ':' || \
+                                        format_type(a.atttypid, a.atttypmod) \
+                                        ORDER BY a.attnum) \
+                         FROM pg_attribute a \
+                        WHERE a.attrelid = c.oid AND a.attnum > 0 \
+                          AND NOT a.attisdropped) = \
+                      ARRAY['singleton:boolean', 'library_version:text', \
+                            'artifact_sha256:text', 'zapadka_version:text', \
+                            'installed_at:timestamp with time zone'])",
+            &[&TEST_SCHEMA],
+        )
+        .await
+        .map(|row| row.get(0))
+        .map_err(|error| registry_failed(error, "validate the installation marker"))
+}
+
+fn unowned_test_schema() -> Error {
+    Error::new(
+        ErrorCode::RegistryUpgradeFailed,
+        format!("schema {TEST_SCHEMA} exists but was not created by Zapadka"),
+    )
+    .with_hint(format!(
+        "Zapadka reserves {TEST_SCHEMA} for its test framework; rename or drop the existing \
+         schema if it is not needed"
+    ))
+}
+
+/// Installs Zapadka's assertion library, replacing a recognized installation.
 ///
 /// The whole install runs in one transaction: a half-installed assertion
 /// library would produce test failures that look like application bugs.
@@ -225,11 +272,11 @@ pub async fn install(client: &mut Client, _server_version: &str) -> Result<Strin
     let transaction = client
         .transaction()
         .await
-        .map_err(|error| registry_failed(error, "begin the pgTAP install"))?;
+        .map_err(|error| registry_failed(error, "begin the test-library install"))?;
 
-    // Dropped and recreated rather than patched: pgTAP has no in-place upgrade
-    // path between arbitrary versions, and a test schema holds nothing worth
-    // preserving.
+    // Dropped and recreated rather than patched. `installed` has already proved
+    // this is our reserved schema, whose contract says it holds no application
+    // data; it refuses every schema it cannot identify that strongly.
     transaction
         .batch_execute(&format!(
             "DROP SCHEMA IF EXISTS {quoted} CASCADE;\n\
@@ -241,8 +288,8 @@ pub async fn install(client: &mut Client, _server_version: &str) -> Result<Strin
         .await
         .map_err(|error| registry_failed(error, "create the test schema"))?;
 
-    // pgTAP's SQL creates unqualified objects, so the schema is chosen by the
-    // search path rather than by editing the vendored file.
+    // The SQL creates unqualified objects, so the schema is selected with the
+    // search path rather than repeated throughout the embedded files.
     transaction
         .batch_execute(&format!("SET LOCAL search_path = {quoted}, pg_catalog;"))
         .await
@@ -268,7 +315,7 @@ pub async fn install(client: &mut Client, _server_version: &str) -> Result<Strin
              );"
         ))
         .await
-        .map_err(|error| registry_failed(error, "record the pgTAP installation"))?;
+        .map_err(|error| registry_failed(error, "record the test-library installation"))?;
 
     transaction
         .execute(
@@ -279,12 +326,12 @@ pub async fn install(client: &mut Client, _server_version: &str) -> Result<Strin
             &[&TEST_LIBRARY_VERSION, &sha256, &env!("CARGO_PKG_VERSION")],
         )
         .await
-        .map_err(|error| registry_failed(error, "record the pgTAP installation"))?;
+        .map_err(|error| registry_failed(error, "record the test-library installation"))?;
 
     transaction
         .commit()
         .await
-        .map_err(|error| registry_failed(error, "commit the pgTAP install"))?;
+        .map_err(|error| registry_failed(error, "commit the test-library install"))?;
 
     Ok(sha256)
 }
