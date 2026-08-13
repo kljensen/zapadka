@@ -30,7 +30,13 @@ pub const PROTOCOL_VERSION: i32 = 1;
 pub async fn begin(transaction: &Transaction<'_>) -> Result<()> {
     let quoted = crate::registry::quote_identifier(crate::testlib::TEST_SCHEMA);
     transaction
-        .batch_execute(&format!("SELECT {quoted}._begin_run()"))
+        .batch_execute(&format!(
+            "SELECT {quoted}._begin_run();\n\
+             GRANT SELECT, INSERT, UPDATE ON TABLE \
+                 pg_temp.__zapadka_run, \
+                 pg_temp.__zapadka_assertion, \
+                 pg_temp.__zapadka_note TO PUBLIC;"
+        ))
         .await
         .map_err(|error| registry_failed(error, "prepare the test capture tables"))
 }

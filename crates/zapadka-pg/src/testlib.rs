@@ -284,7 +284,8 @@ pub async fn install(client: &mut Client, _server_version: &str) -> Result<Strin
              CREATE SCHEMA {quoted};\n\
              COMMENT ON SCHEMA {quoted} IS \
              'Zapadka test assertions {TEST_LIBRARY_VERSION}, installed by Zapadka. Safe to \
-              drop; contains no application data.';"
+              drop; contains no application data.';\n\
+             GRANT USAGE ON SCHEMA {quoted} TO PUBLIC;"
         ))
         .await
         .map_err(|error| registry_failed(error, "create the test schema"))?;

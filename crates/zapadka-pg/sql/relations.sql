@@ -31,6 +31,10 @@ $$ LANGUAGE sql IMMUTABLE;
 -- `DROP TABLE IF EXISTS` would do, but it raises a NOTICE when the table is
 -- absent -- which is the normal case for the first comparison in a file, and
 -- noise in a test run nobody should have to learn to ignore.
+CREATE OR REPLACE FUNCTION _scratch(relation name) RETURNS name AS $$
+    SELECT (relation::text || '_' || substr(md5(current_user), 1, 12))::name;
+$$ LANGUAGE sql STABLE;
+
 CREATE OR REPLACE FUNCTION _drop_scratch(relation name) RETURNS void AS $$
 BEGIN
     IF to_regclass('pg_temp.' || quote_ident(relation)) IS NOT NULL THEN
@@ -47,8 +51,8 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION _materialise(relation name, query text)
 RETURNS void AS $$
 BEGIN
-    PERFORM _drop_scratch(relation);
-    EXECUTE format('CREATE TEMP TABLE %I ON COMMIT DROP AS %s', relation, query);
+    PERFORM _drop_scratch(_scratch(relation));
+    EXECUTE format('CREATE TEMP TABLE %I ON COMMIT DROP AS %s', _scratch(relation), query);
 END;
 $$ LANGUAGE plpgsql;
 
@@ -56,9 +60,9 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION _materialise_array(relation name, values_ anyarray)
 RETURNS void AS $$
 BEGIN
-    PERFORM _drop_scratch(relation);
+    PERFORM _drop_scratch(_scratch(relation));
     EXECUTE format('CREATE TEMP TABLE %I ON COMMIT DROP AS SELECT unnest($1) AS value',
-                   relation)
+                   _scratch(relation))
     USING values_;
 END;
 $$ LANGUAGE plpgsql;
@@ -67,7 +71,7 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION _column_names(relation name) RETURNS name[] AS $$
     SELECT array_agg(a.attname ORDER BY a.attnum)
       FROM pg_catalog.pg_attribute a
-     WHERE a.attrelid = ('pg_temp.' || quote_ident(relation))::regclass
+     WHERE a.attrelid = ('pg_temp.' || quote_ident(_scratch(relation)))::regclass
        AND a.attnum > 0
        AND NOT a.attisdropped;
 $$ LANGUAGE sql STABLE;
@@ -82,7 +86,7 @@ CREATE OR REPLACE FUNCTION _column_descriptors(relation name) RETURNS jsonb AS $
         ) ORDER BY a.attnum
     ), '[]'::jsonb)
       FROM pg_catalog.pg_attribute a
-     WHERE a.attrelid = ('pg_temp.' || quote_ident(relation))::regclass
+     WHERE a.attrelid = ('pg_temp.' || quote_ident(_scratch(relation)))::regclass
        AND a.attnum > 0
        AND NOT a.attisdropped;
 $$ LANGUAGE sql STABLE;
@@ -112,7 +116,7 @@ BEGIN
         'SELECT coalesce(jsonb_agg(row_json), ''[]''::jsonb)
            FROM (SELECT jsonb_build_array(%s) AS row_json
                    FROM pg_temp.%I LIMIT %s) sampled',
-        builder, relation, sample_limit
+        builder, _scratch(relation), sample_limit
     ) INTO result;
     RETURN result;
 END;
@@ -129,12 +133,12 @@ CREATE OR REPLACE FUNCTION _difference(
     all_rows  boolean
 ) RETURNS void AS $$
 BEGIN
-    PERFORM _drop_scratch(target);
+    PERFORM _drop_scratch(_scratch(target));
     EXECUTE format(
         'CREATE TEMP TABLE %I ON COMMIT DROP AS
              SELECT * FROM pg_temp.%I %s SELECT * FROM pg_temp.%I',
-        target, left_rel, CASE WHEN all_rows THEN 'EXCEPT ALL' ELSE 'EXCEPT' END,
-        right_rel
+        _scratch(target), _scratch(left_rel), CASE WHEN all_rows THEN 'EXCEPT ALL' ELSE 'EXCEPT' END,
+        _scratch(right_rel)
     );
 END;
 $$ LANGUAGE plpgsql;
@@ -143,7 +147,7 @@ CREATE OR REPLACE FUNCTION _count_of(relation name) RETURNS bigint AS $$
 DECLARE
     total bigint;
 BEGIN
-    EXECUTE format('SELECT count(*) FROM pg_temp.%I', relation) INTO total;
+    EXECUTE format('SELECT count(*) FROM pg_temp.%I', _scratch(relation)) INTO total;
     RETURN total;
 END;
 $$ LANGUAGE plpgsql;
@@ -322,19 +326,36 @@ $$ LANGUAGE sql;
 
 -- Materialises a query preserving the order its rows arrived in.
 --
--- `row_number() OVER ()` numbers rows in the order the scan produces them,
--- which is the order the query actually returned. That is the only order an
--- ordered comparison can honestly mean: a query without `ORDER BY` has no
--- guaranteed order, and this reports what it did rather than what it promised.
+-- A direct CREATE TABLE AS permits a data-modifying CTE at statement scope.
+-- Direct INSERT/UPDATE/DELETE ... RETURNING needs the fallback CTE wrapper.
+-- Both forms execute the supplied query exactly once.
 CREATE OR REPLACE FUNCTION _materialise_ordered(relation name, query text)
 RETURNS void AS $$
 BEGIN
-    PERFORM _drop_scratch(relation);
+    PERFORM _drop_scratch(_scratch(relation));
+    BEGIN
+        EXECUTE format('CREATE TEMP TABLE %I ON COMMIT DROP AS %s',
+                       _scratch(relation), query);
+    EXCEPTION WHEN syntax_error THEN
+        EXECUTE format(
+            'CREATE TEMP TABLE %I ON COMMIT DROP AS
+             WITH __zapadka_capture AS (%s)
+             SELECT * FROM __zapadka_capture',
+            _scratch(relation), query
+        );
+    END;
+
+    EXECUTE format('ALTER TABLE pg_temp.%I ADD COLUMN __position bigint',
+                   _scratch(relation));
     EXECUTE format(
-        'CREATE TEMP TABLE %I ON COMMIT DROP AS
-             SELECT row_number() OVER () AS __position, source.*
-               FROM (%s) source',
-        relation, query
+        'UPDATE pg_temp.%1$I result
+            SET __position = numbered.position
+           FROM (
+                SELECT ctid, row_number() OVER () AS position
+                  FROM pg_temp.%1$I
+           ) numbered
+          WHERE result.ctid = numbered.ctid',
+        _scratch(relation)
     );
 END;
 $$ LANGUAGE plpgsql;
@@ -390,9 +411,11 @@ BEGIN
 
         EXECUTE format(
             'SELECT min(h.__position)
-               FROM pg_temp.__zapadka_have h
-               FULL JOIN pg_temp.__zapadka_want w ON w.__position = h.__position
+               FROM pg_temp.%I h
+               FULL JOIN pg_temp.%I w ON w.__position = h.__position
               WHERE h.__position IS NULL OR w.__position IS NULL OR (%s)',
+            _scratch('__zapadka_have'),
+            _scratch('__zapadka_want'),
             coalesce(predicate, 'false')
         ) INTO first_bad;
     EXCEPTION WHEN undefined_column OR datatype_mismatch OR undefined_function THEN

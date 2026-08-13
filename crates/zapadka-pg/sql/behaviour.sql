@@ -31,6 +31,29 @@ CREATE OR REPLACE FUNCTION _record_throw(
     );
 $$ LANGUAGE sql;
 
+-- pgTAP accepts either SQL or a prepared-statement name for behavioral
+-- assertions. Resolve a name only when it is actually registered in this
+-- session, leaving every other value as raw SQL.
+CREATE OR REPLACE FUNCTION _sql_or_prepared(input text) RETURNS text AS $$
+DECLARE
+    statement_name text;
+BEGIN
+    IF input ~ '^[A-Za-z_][A-Za-z0-9_$]*$' THEN
+        statement_name := lower(input);
+    ELSIF input ~ '^"(?:[^"]|"")+"$' THEN
+        statement_name := replace(substr(input, 2, length(input) - 2), '""', '"');
+    ELSE
+        RETURN input;
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM pg_prepared_statements WHERE name = statement_name) THEN
+        RETURN format('EXECUTE %I', statement_name);
+    END IF;
+
+    RETURN input;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
 -- `throws_ok(sql, sqlstate, message, description)`
 --
 -- A NULL expectation is "anything": `throws_ok(sql)` asserts only that
@@ -58,7 +81,7 @@ BEGIN
     END IF;
 
     BEGIN
-        EXECUTE $1;
+        EXECUTE _sql_or_prepared($1);
     EXCEPTION WHEN OTHERS THEN
         GET STACKED DIAGNOSTICS
             code    = RETURNED_SQLSTATE,
@@ -161,7 +184,7 @@ DECLARE
     matched boolean;
 BEGIN
     BEGIN
-        EXECUTE query;
+        EXECUTE _sql_or_prepared(query);
     EXCEPTION WHEN OTHERS THEN
         GET STACKED DIAGNOSTICS
             code    = RETURNED_SQLSTATE,
@@ -241,7 +264,7 @@ DECLARE
     hint    text;
 BEGIN
     BEGIN
-        EXECUTE $1;
+        EXECUTE _sql_or_prepared($1);
     EXCEPTION WHEN OTHERS THEN
         GET STACKED DIAGNOSTICS
             code    = RETURNED_SQLSTATE,

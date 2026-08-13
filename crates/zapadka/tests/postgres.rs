@@ -886,6 +886,72 @@ fn runs_database_tests_against_a_prepared_target() {
 }
 
 #[test]
+fn results_eq_compares_columns_by_position() {
+    let db = database();
+    let project = project();
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    project.test_file(
+        "ordered.sql",
+        "SELECT plan(1);
+         SELECT results_eq(
+             'SELECT 1 AS order_id, ''paid''::text AS order_status',
+             'SELECT 1 AS id, ''paid''::text AS status',
+             'ordered values ignore result-column labels'
+         );
+         SELECT finish();",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_success();
+    assert_eq!(report.json["tests"][0]["assertions"][0]["status"], "passed");
+}
+
+#[test]
+fn results_eq_accepts_data_modifying_queries() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-events",
+        &[],
+        "CREATE TABLE public.events (id bigint PRIMARY KEY);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    project.test_file(
+        "data-modifying.sql",
+        "SELECT plan(2);
+         SELECT results_eq(
+             $$WITH inserted AS (
+                   INSERT INTO public.events VALUES (1) RETURNING id
+               ) SELECT id FROM inserted$$,
+             ARRAY[1::bigint],
+             'a writable CTE can be compared'
+         );
+         SELECT results_eq(
+             $$INSERT INTO public.events VALUES (2) RETURNING id$$,
+             ARRAY[2::bigint],
+             'a direct INSERT RETURNING can be compared'
+         );
+         SELECT finish();",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_success();
+    assert!(
+        report.json["tests"][0]["assertions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|assertion| assertion["status"] == "passed")
+    );
+}
+
+#[test]
 fn a_failing_assertion_fails_the_run_and_reports_its_diagnostics() {
     let db = database();
     let project = project();
@@ -1002,6 +1068,44 @@ fn exception_privilege_and_type_assertions_work_and_report_structurally() {
             "passed", "passed", "passed", "passed", "passed", "passed", "failed"
         ],
         "only the last assertion should fail: {statuses:?}"
+    );
+}
+
+#[test]
+fn behaviour_assertions_accept_prepared_statement_names() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "create-orders",
+        &[],
+        "CREATE TABLE public.orders (id bigint PRIMARY KEY);",
+    );
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+
+    project.test_file(
+        "prepared-statements.sql",
+        "PREPARE doinsert AS INSERT INTO public.orders VALUES (1);\n\
+         SELECT lives_ok('doinsert', 'an unquoted prepared statement lives');\n\
+         PREPARE \"doinsert quoted\" AS INSERT INTO public.orders VALUES (2);\n\
+         SELECT lives_ok('\"doinsert quoted\"', 'a quoted prepared statement lives');\n\
+         PREPARE duplicate_insert AS INSERT INTO public.orders VALUES (1);\n\
+         SELECT throws_like('duplicate_insert', '%duplicate key value%',\n\
+        \x20                  'a prepared statement raises its database error');\n\
+         SELECT lives_ok($$SELECT count(*) FROM public.orders$$,\n\
+        \x20                'raw SQL remains supported');",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_success();
+
+    let assertions = report.json["tests"][0]["assertions"].as_array().unwrap();
+    assert_eq!(assertions.len(), 4);
+    assert!(
+        assertions
+            .iter()
+            .all(|assertion| assertion["status"] == "passed")
     );
 }
 
