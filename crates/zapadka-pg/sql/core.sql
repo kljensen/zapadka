@@ -20,7 +20,7 @@ $$ LANGUAGE sql IMMUTABLE;
 -- name would tell a test file it could rely on pgTAP behaviour Zapadka does not
 -- implement.
 CREATE OR REPLACE FUNCTION zapadka_test_version() RETURNS text AS $$
-    SELECT '1';
+    SELECT '2';
 $$ LANGUAGE sql IMMUTABLE;
 
 -- Creates the per-file capture tables.

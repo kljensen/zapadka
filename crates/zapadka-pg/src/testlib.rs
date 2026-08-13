@@ -38,7 +38,7 @@ pub const TEST_SCHEMA: &str = "zapadka_test";
 /// Reported to operators and recorded in the installed schema. Distinct from
 /// the capture protocol: the protocol changes when the *tables* change, this
 /// changes when the assertions do.
-pub const TEST_LIBRARY_VERSION: &str = "1";
+pub const TEST_LIBRARY_VERSION: &str = "2";
 
 /// Zapadka's own assertion library.
 ///
@@ -49,6 +49,7 @@ pub const TEST_LIBRARY_VERSION: &str = "1";
 const NATIVE_SOURCE: &[(&str, &str)] = &[
     ("core", include_str!("../sql/core.sql")),
     ("objects", include_str!("../sql/objects.sql")),
+    ("columns", include_str!("../sql/columns.sql")),
     ("relations", include_str!("../sql/relations.sql")),
     ("behaviour", include_str!("../sql/behaviour.sql")),
     ("catalog", include_str!("../sql/catalog.sql")),

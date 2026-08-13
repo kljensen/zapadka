@@ -882,7 +882,7 @@ fn runs_database_tests_against_a_prepared_target() {
         db.scalar("SELECT count(*) FROM pg_extension WHERE extname = 'pgtap'"),
         "0"
     );
-    assert_eq!(db.scalar("SELECT zapadka_test.zapadka_test_version()"), "1");
+    assert_eq!(db.scalar("SELECT zapadka_test.zapadka_test_version()"), "2");
 }
 
 #[test]
@@ -1024,7 +1024,7 @@ fn every_public_assertion_resolves_and_passes() {
     report.assert_success();
 
     let assertions = report.json["tests"][0]["assertions"].as_array().unwrap();
-    assert_eq!(assertions.len(), 67, "the plan and the file must agree");
+    assert_eq!(assertions.len(), 103, "the plan and the file must agree");
 
     // The only non-passing entries should be the deliberate TODO and SKIP.
     let unusual: Vec<&str> = assertions
@@ -1046,7 +1046,14 @@ const EVERY_ASSERTION: &str = r"-- Every public assertion, exercised so that all
 -- overload, or a helper that does not resolve shows up here as an aborted file
 -- rather than as a mystery in someone's project months later.
 CREATE SCHEMA fixture;
-CREATE TABLE fixture.orders (id bigint PRIMARY KEY, status text NOT NULL DEFAULT 'new');
+CREATE TABLE fixture.orders (
+    id bigint PRIMARY KEY,
+    status text NOT NULL DEFAULT 'new',
+    label character varying(12),
+    note text,
+    attempts integer DEFAULT 3,
+    enabled boolean DEFAULT true
+);
 INSERT INTO fixture.orders (id, status) VALUES (1, 'paid'), (2, 'pending');
 CREATE VIEW fixture.paid AS SELECT * FROM fixture.orders WHERE status = 'paid';
 CREATE SEQUENCE fixture.counter;
@@ -1055,8 +1062,9 @@ CREATE DOMAIN fixture.positive AS integer CHECK (VALUE > 0);
 CREATE ROLE fixture_reader;
 GRANT USAGE ON SCHEMA fixture TO fixture_reader;
 GRANT SELECT ON fixture.orders TO fixture_reader;
+SET LOCAL search_path = pg_temp, zapadka_test, fixture, pg_catalog;
 
-SELECT plan(67);
+SELECT plan(103);
 
 -- scalar
 SELECT ok(true, 'ok');
@@ -1101,6 +1109,55 @@ SELECT has_pk('fixture', 'orders', 'has_pk');
 SELECT col_is_pk('fixture', 'orders', 'id', 'col_is_pk');
 SELECT col_is_pk('fixture'::name, 'orders'::name, 'id'::name);
 SELECT col_is_pk('fixture'::name, 'orders'::name, ARRAY['id']::name[]);
+
+-- column properties: every public overload resolves and passes.
+SELECT col_not_null('fixture', 'orders', 'status', 'col_not_null qualified');
+SELECT col_not_null('fixture'::name, 'orders'::name, 'status'::name);
+SELECT col_not_null('orders', 'status', 'col_not_null visible');
+SELECT col_not_null('orders', 'status');
+SELECT col_not_null_in('fixture', 'orders', 'status', 'col_not_null_in described');
+SELECT col_not_null_in('fixture', 'orders', 'status');
+
+SELECT col_is_null('fixture', 'orders', 'note', 'col_is_null qualified');
+SELECT col_is_null('fixture'::name, 'orders'::name, 'note'::name);
+SELECT col_is_null('orders', 'note', 'col_is_null visible');
+SELECT col_is_null('orders', 'note');
+SELECT col_is_null_in('fixture', 'orders', 'note', 'col_is_null_in described');
+SELECT col_is_null_in('fixture', 'orders', 'note');
+
+SELECT col_has_default('fixture', 'orders', 'status', 'col_has_default qualified');
+SELECT col_has_default('fixture'::name, 'orders'::name, 'status'::name);
+SELECT col_has_default('orders', 'status', 'col_has_default visible');
+SELECT col_has_default('orders', 'status');
+SELECT col_has_default_in('fixture', 'orders', 'status', 'col_has_default_in described');
+SELECT col_has_default_in('fixture', 'orders', 'status');
+
+SELECT col_hasnt_default('fixture', 'orders', 'note', 'col_hasnt_default qualified');
+SELECT col_hasnt_default('fixture'::name, 'orders'::name, 'note'::name);
+SELECT col_hasnt_default('orders', 'note', 'col_hasnt_default visible');
+SELECT col_hasnt_default('orders', 'note');
+SELECT col_hasnt_default_in('fixture', 'orders', 'note', 'col_hasnt_default_in described');
+SELECT col_hasnt_default_in('fixture', 'orders', 'note');
+
+SELECT col_type_is('fixture', 'orders', 'label', 'varchar(12)', 'col_type_is qualified');
+SELECT col_type_is('fixture'::name, 'orders'::name, 'label'::name, 'varchar(12)');
+SELECT col_type_is('orders', 'label', 'varchar(12)', 'col_type_is visible');
+SELECT col_type_is('orders', 'label', 'varchar(12)');
+SELECT col_type_is_in('fixture', 'orders', 'label', 'varchar(12)', 'col_type_is_in described');
+SELECT col_type_is_in('fixture', 'orders', 'label', 'varchar(12)');
+
+SELECT col_default_is('fixture', 'orders', 'attempts', 3::integer,
+                      'col_default_is qualified typed');
+SELECT col_default_is('fixture', 'orders', 'enabled', 'true',
+                      'col_default_is qualified text');
+SELECT col_default_is('orders', 'attempts', 3::integer,
+                      'col_default_is visible typed');
+SELECT col_default_is('orders', 'status', 'new',
+                      'col_default_is visible text');
+SELECT col_default_is_in('fixture', 'orders', 'attempts', 3::integer,
+                         'col_default_is_in typed');
+SELECT col_default_is_in('fixture', 'orders', 'status', 'new',
+                         'col_default_is_in text');
 -- Queries that cannot be compared are certainly not the same set, and this
 -- must record an assertion rather than abort the file.
 SELECT set_ne('SELECT id, status FROM fixture.orders', 'SELECT id FROM fixture.orders',
@@ -1151,6 +1208,57 @@ SELECT skip('skipped on purpose', 1);
 
 SELECT finish();
 ";
+
+#[test]
+fn column_property_failures_are_structured_and_do_not_abort_the_file() {
+    let db = database();
+    let project = project();
+    project
+        .report(&["deploy", "--uri", &db.uri()])
+        .assert_success();
+    project.test_file(
+        "columns.sql",
+        "CREATE SCHEMA fixture;
+         CREATE TABLE fixture.properties (
+             nullable text,
+             required text NOT NULL,
+             plain integer,
+             enabled boolean DEFAULT true
+         );
+         SELECT col_not_null('fixture', 'properties', 'nullable', 'wrong nullability');
+         SELECT col_has_default('fixture', 'properties', 'plain', 'missing default');
+         SELECT col_default_is('fixture', 'properties', 'enabled', 'false', 'wrong default');
+         SELECT col_default_is('fixture', 'properties', 'enabled', 'not-a-bool', 'invalid default');
+         SELECT col_type_is('fixture', 'properties', 'enabled', 'integer', 'wrong type');
+         SELECT col_type_is('fixture', 'properties', 'enabled', 'not_a_type', 'invalid type');
+         SELECT col_not_null('missing', 'properties', 'required', 'missing relation');
+         SELECT col_not_null('fixture', 'properties', 'missing', 'missing column');",
+    );
+
+    let report = project.report(&["test", "--uri", &db.uri()]);
+    report.assert_failed("verify.failed", exit::EXECUTION);
+
+    let assertions = report.json["tests"][0]["assertions"].as_array().unwrap();
+    assert_eq!(assertions.len(), 8);
+    let diagnostics: Vec<&serde_json::Value> = assertions
+        .iter()
+        .map(|assertion| &assertion["diagnostics"])
+        .collect();
+
+    assert_eq!(diagnostics[0]["kind"], "column_property");
+    assert_eq!(diagnostics[0]["property"], "not_null");
+    assert_eq!(diagnostics[1]["property"], "has_default");
+    assert_eq!(diagnostics[2]["kind"], "column_property");
+    assert_eq!(diagnostics[2]["property"], "default");
+    assert_eq!(diagnostics[3]["kind"], "invalid_expected");
+    assert_eq!(diagnostics[3]["property"], "default");
+    assert_eq!(diagnostics[4]["property"], "type");
+    assert_eq!(diagnostics[5]["kind"], "invalid_expected");
+    assert_eq!(diagnostics[6]["kind"], "missing_object");
+    assert_eq!(diagnostics[6]["object_type"], "relation");
+    assert_eq!(diagnostics[7]["kind"], "missing_object");
+    assert_eq!(diagnostics[7]["object_type"], "column");
+}
 
 /// Kills the backend running a nontransactional migration, mid-statement.
 ///
