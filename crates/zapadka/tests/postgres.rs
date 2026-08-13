@@ -1024,7 +1024,7 @@ fn every_public_assertion_resolves_and_passes() {
     report.assert_success();
 
     let assertions = report.json["tests"][0]["assertions"].as_array().unwrap();
-    assert_eq!(assertions.len(), 66, "the plan and the file must agree");
+    assert_eq!(assertions.len(), 67, "the plan and the file must agree");
 
     // The only non-passing entries should be the deliberate TODO and SKIP.
     let unusual: Vec<&str> = assertions
@@ -1056,7 +1056,7 @@ CREATE ROLE fixture_reader;
 GRANT USAGE ON SCHEMA fixture TO fixture_reader;
 GRANT SELECT ON fixture.orders TO fixture_reader;
 
-SELECT plan(66);
+SELECT plan(67);
 
 -- scalar
 SELECT ok(true, 'ok');
@@ -1082,6 +1082,7 @@ SELECT hasnt_table_in('fixture', 'nope');
 SELECT has_view_in('fixture', 'paid');
 SELECT has_column_in('fixture', 'orders', 'status');
 SELECT col_is_pk_in('fixture', 'orders', 'id');
+SELECT col_is_pk_in('fixture', 'orders', ARRAY['id']::name[]);
 SELECT has_pk_in('fixture', 'orders');
 SELECT throws_sqlstate($$SELECT 1/0$$, '22012', 'throws_sqlstate');
 SELECT hasnt_table('fixture', 'nope', 'hasnt_table qualified');
@@ -1186,10 +1187,17 @@ fn a_backend_killed_mid_statement_leaves_the_target_blocked() {
             std::thread::sleep(std::time::Duration::from_millis(50));
             let killed = harness::try_psql(
                 &uri,
-                "SELECT count(*) FROM (SELECT pg_terminate_backend(pid) \
-                   FROM pg_stat_activity \
-                  WHERE query LIKE 'CREATE INDEX CONCURRENTLY%' \
-                    AND pid <> pg_backend_pid()) t",
+                // Counts terminations that actually happened, not candidates:
+                // the backend can vanish between the scan and the call, and
+                // counting rows would claim a kill that never landed. Scoped to
+                // this database so a concurrently running test's migration in
+                // another database is not collateral.
+                "SELECT count(*) FILTER (WHERE terminated) FROM ( \
+                   SELECT pg_terminate_backend(pid) AS terminated \
+                     FROM pg_stat_activity \
+                    WHERE query LIKE 'CREATE INDEX CONCURRENTLY%' \
+                      AND datname = current_database() \
+                      AND pid <> pg_backend_pid()) t",
             );
             if matches!(killed.as_deref(), Ok(count) if count.trim() != "0") {
                 return true;

@@ -565,3 +565,9 @@ CREATE OR REPLACE FUNCTION has_pk_in(name, name) RETURNS boolean AS $$
     SELECT has_pk($1::name, $2::name, 'table ' || quote_ident($1) || '.'
         || quote_ident($2) || ' should have a primary key');
 $$ LANGUAGE sql;
+
+-- The composite-key form without a description. `col_is_pk` has it; `_in`
+-- needs it too, or the natural call for a two-column key does not resolve.
+CREATE OR REPLACE FUNCTION col_is_pk_in(name, name, name[]) RETURNS boolean AS $$
+    SELECT col_is_pk($1::name, $2::name, $3);
+$$ LANGUAGE sql;

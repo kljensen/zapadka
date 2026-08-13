@@ -45,6 +45,14 @@ use uuid::Uuid;
 const IMAGE_NAME: &str = "postgres@sha256";
 const IMAGE_DIGEST: &str = "9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15";
 
+/// The label that marks a container as this harness's own.
+///
+/// `org.testcontainers.managed-by` is not enough: every project using
+/// testcontainers sets it, so a sweep filtered on that plus the image would
+/// remove another project's PostgreSQL if it pinned the same digest. Deleting
+/// somebody else's running database is a high price for tidiness.
+const OWNER_LABEL: &str = "dev.zapadka.test-harness";
+
 /// The PostgreSQL release the digest above corresponds to, asserted at run time
 /// so that a digest bump to a different major version cannot pass unnoticed.
 const EXPECTED_MAJOR: &str = "18";
@@ -75,10 +83,11 @@ struct Postgres {
 /// there is no hook that runs after the last test. It bounds the leak to the
 /// containers currently in flight instead of every run ever made.
 ///
-/// The filter is deliberately narrow -- this harness's exact pinned digest, and
-/// only containers `testcontainers` created. It cannot match a PostgreSQL a
-/// developer is running for anything else, because no other container shares
-/// that digest *and* that label.
+/// The filter matches only containers this harness labelled as its own. An
+/// earlier version filtered on the image digest plus
+/// `org.testcontainers.managed-by`, which every testcontainers project sets --
+/// so another project pinning the same PostgreSQL image would have had its
+/// running container destroyed by someone starting these tests.
 ///
 /// The one case it gets wrong is two test binaries running at once, where the
 /// second would remove the first's container. `cargo test` runs binaries
@@ -90,14 +99,7 @@ fn sweep_leaked_containers() {
     }
 
     let listed = std::process::Command::new("docker")
-        .args([
-            "ps",
-            "-aq",
-            "--filter",
-            &format!("ancestor={IMAGE_NAME}:{IMAGE_DIGEST}"),
-            "--filter",
-            "label=org.testcontainers.managed-by",
-        ])
+        .args(["ps", "-aq", "--filter", &format!("label={OWNER_LABEL}")])
         .output();
     let Ok(listed) = listed else {
         // No Docker is a problem the container start will report far better
@@ -135,6 +137,9 @@ fn postgres() -> &'static Postgres {
             ))
             .with_env_var("POSTGRES_PASSWORD", PASSWORD)
             .with_env_var("POSTGRES_DB", "postgres")
+            // Applied last: this returns a ContainerRequest, past which the
+            // image-level builders are no longer available.
+            .with_label(OWNER_LABEL, "1")
             .start()
             .unwrap_or_else(|error| {
                 panic!(
