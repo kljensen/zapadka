@@ -130,10 +130,14 @@ impl Runner {
     /// anything a function does outside the database.
     ///
     /// So the honest guarantee is about *the registry and the script's
-    /// transactional effects* agreeing — not about the registry describing the
-    /// database. Zapadka records what it ran; it does not audit live state, and
-    /// `baseline` and `resolve` write applied rows from an operator's word
-    /// alone.
+    /// transactional effects* agreeing. What makes the registry's claim
+    /// answerable is verification: `verify.sql` runs automatically once this
+    /// commits, against the real catalog and real rows, and a failure stops the
+    /// run. The registry is not asked to be believed on its own.
+    ///
+    /// What is absent is continuous checking. Nothing re-examines the schema
+    /// between runs, and `baseline` and `resolve` write applied rows from an
+    /// operator's word — recorded as assertions rather than observations.
     pub async fn deploy(&mut self, migration: &Migration) -> Result<ScriptOutcome> {
         let started = Instant::now();
         let path = migration.deploy.relative_path.clone();

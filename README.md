@@ -42,9 +42,18 @@ the row recording it as applied commit together: a crash leaves both or neither.
 That guarantee covers what PostgreSQL rolls back, and no more. A script that
 advances a sequence and then fails leaves the sequence advanced while Zapadka
 records the migration as not applied — `nextval()` is not transactional.
-Zapadka records **what it ran**, faithfully and immutably; it does not audit
-what the database now contains, and `baseline` and `resolve` write applied rows
-on an operator's word.
+
+**So the registry is checked against the database, not trusted on its own.**
+Each migration's `verify.sql` runs automatically after that migration commits,
+and a failure stops the run: the registry says a migration is applied, and
+verification is what makes that claim answerable. `zapadka test` checks further
+and more broadly. Both inspect the real catalog and real rows.
+
+What Zapadka does *not* do is check continuously. Nothing re-examines the
+schema between runs, so a change made outside Zapadka goes unnoticed until you
+next verify or test — and `baseline` and `resolve` deliberately write applied
+rows on an operator's word, both requiring an explicit acknowledgement and both
+recorded as assertions rather than observations.
 
 **Deployed history is immutable.** Editing a migration that has already been
 applied is a hard error, not a warning and not a silent re-run. Corrective work
