@@ -48,6 +48,8 @@ components from attribution-only references.
 
   ```sql
   SELECT has_table('app', 'orders', 'the orders table exists');
+  SELECT col_not_null('app', 'orders', 'total', 'totals are required');
+  SELECT col_default_is('app', 'orders', 'status', 'pending', 'initial status');
   SELECT set_eq('SELECT status FROM app.orders', ARRAY['paid', 'pending']);
   SELECT throws_ok($$INSERT INTO app.orders VALUES (1)$$, '23505');
   ```
@@ -57,7 +59,9 @@ components from attribution-only references.
   comparison reports the differing rows with their column names and types
   rather than two rendered strings to diff by eye. `plan()` and `finish()` are
   supported but never required — and a declared plan is now enforced rather
-  than merely reported.
+  than merely reported. Column nullability, type, and default assertions report
+  missing relations, missing columns, invalid expectations, and property
+  mismatches as distinct structured failures.
 - Deployments are serialized by a session-scoped advisory lock, and contention
   reports who holds it.
 - Every command emits one versioned `ReportV1`; `--output json` writes exactly

@@ -9,16 +9,16 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/kljensen/zapadka"
 
 [workspace.dependencies]
-zapadka-core = { path = "crates/zapadka-core", version = "0.3.1" }
-zapadka-parser = { path = "crates/zapadka-parser", version = "0.3.1" }
-zapadka-pg = { path = "crates/zapadka-pg", version = "0.3.1" }
+zapadka-core = { path = "crates/zapadka-core", version = "0.4.0" }
+zapadka-parser = { path = "crates/zapadka-parser", version = "0.4.0" }
+zapadka-pg = { path = "crates/zapadka-pg", version = "0.4.0" }
 
 anyhow = "1.0.104"
 camino = "1.2.5"
