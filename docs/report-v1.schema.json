@@ -406,6 +406,13 @@
           "format": "uint64",
           "minimum": 0
         },
+        "server_messages": {
+          "description": "Server messages PostgreSQL sent while this script executed, in delivery\norder. These are not Zapadka diagnostics: they are the SQL author's\nown output, preserved without severity filtering.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ServerMessage"
+          }
+        },
         "error": {
           "description": "Why it failed, when it did.",
           "anyOf": [
@@ -443,6 +450,165 @@
           "type": "string",
           "const": "verify"
         }
+      ]
+    },
+    "ServerMessage": {
+      "description": "One asynchronous PostgreSQL server event observed while a script ran.",
+      "oneOf": [
+        {
+          "description": "A PostgreSQL `NoticeResponse`, including all fields the driver exposes.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "notice"
+            }
+          },
+          "$ref": "#/$defs/ServerNotice",
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "A PostgreSQL `NotificationResponse`, normally produced by `NOTIFY`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "notification"
+            }
+          },
+          "$ref": "#/$defs/ServerNotification",
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "ServerNotice": {
+      "description": "A PostgreSQL notice or warning.",
+      "type": "object",
+      "properties": {
+        "severity": {
+          "description": "The server-supplied (and possibly localized) severity.",
+          "type": "string"
+        },
+        "sqlstate": {
+          "description": "The five-character PostgreSQL SQLSTATE.",
+          "type": "string"
+        },
+        "message": {
+          "description": "The primary human-readable message.",
+          "type": "string"
+        },
+        "detail": {
+          "description": "Additional server detail, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hint": {
+          "description": "A server-supplied action hint, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "context": {
+          "description": "Procedural-language or internal-query context, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema": {
+          "description": "The schema of the related database object, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "table": {
+          "description": "The related table, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "column": {
+          "description": "The related column, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "datatype": {
+          "description": "The related data type, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "constraint": {
+          "description": "The related constraint, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_file": {
+          "description": "The PostgreSQL source file reporting the message, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_line": {
+          "description": "The PostgreSQL source line reporting the message, when supplied.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source_routine": {
+          "description": "The PostgreSQL source routine reporting the message, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "severity",
+        "sqlstate",
+        "message"
+      ]
+    },
+    "ServerNotification": {
+      "description": "A PostgreSQL asynchronous notification.",
+      "type": "object",
+      "properties": {
+        "channel": {
+          "description": "The notification channel.",
+          "type": "string"
+        },
+        "payload": {
+          "description": "The notification payload.",
+          "type": "string"
+        },
+        "process_id": {
+          "description": "The sending backend PID.",
+          "type": "integer",
+          "format": "int32"
+        }
+      },
+      "required": [
+        "channel",
+        "payload",
+        "process_id"
       ]
     },
     "ReportError": {

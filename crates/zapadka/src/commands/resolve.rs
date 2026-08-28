@@ -74,6 +74,7 @@ pub async fn run(
         .unwrap_or(config.config.policy.advisory_lock_timeout);
 
     let client = opened.connection.client;
+    let server_messages = opened.connection.server_messages;
     let held = lock::acquire(&client, config.config.project.id, wait).await?;
 
     let (client, result) = resolve_under_lock(
@@ -86,6 +87,7 @@ pub async fn run(
         &schema,
         opened.timeouts,
         opened.facts,
+        server_messages,
     )
     .await;
 
@@ -105,6 +107,7 @@ async fn resolve_under_lock(
     schema: &str,
     timeouts: zapadka_pg::Timeouts,
     facts: zapadka_pg::ServerFacts,
+    server_messages: zapadka_pg::ServerMessages,
 ) -> (zapadka_pg::Client, Result<()>) {
     // Read under the lock. A resolve races a deploy by definition -- the deploy
     // that is blocked is often running in the next terminal window.
@@ -128,6 +131,7 @@ async fn resolve_under_lock(
         facts,
         crate::session::VERSION.to_owned(),
         timeouts,
+        server_messages,
     );
 
     let outcome = runner.resolve(&attempt, args.applied).await;

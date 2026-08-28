@@ -62,6 +62,30 @@ fn a_failed_deploy_can_still_leave_the_database_changed() {
 }
 
 #[test]
+fn deployment_preserves_postgresql_notices_and_warnings_in_its_json_report() {
+    let db = database();
+    let project = project();
+    project.migration(
+        "reports-server-output",
+        &[],
+        "DO $$\nBEGIN\n    RAISE NOTICE 'notice from migration';\n    RAISE WARNING 'warning from migration';\nEND $$;",
+    );
+
+    let report = project.report(&["deploy", "--uri", &db.uri()]);
+    report.assert_success();
+    let messages = report.json["migrations"][0]["scripts"][0]["server_messages"]
+        .as_array()
+        .expect("migration server messages are reported");
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert_eq!(messages[0]["kind"], "notice");
+    assert_eq!(messages[0]["severity"], "NOTICE");
+    assert_eq!(messages[0]["message"], "notice from migration");
+    assert_eq!(messages[1]["kind"], "notice");
+    assert_eq!(messages[1]["severity"], "WARNING");
+    assert_eq!(messages[1]["message"], "warning from migration");
+}
+
+#[test]
 fn deploys_an_empty_project_without_creating_anything_unexpected() {
     let db = database();
     let project = project();

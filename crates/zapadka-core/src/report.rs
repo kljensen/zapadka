@@ -223,9 +223,79 @@ pub struct Script {
     /// Wall-clock duration in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// Server messages PostgreSQL sent while this script executed, in delivery
+    /// order. These are not Zapadka diagnostics: they are the SQL author's
+    /// own output, preserved without severity filtering.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub server_messages: Vec<ServerMessage>,
     /// Why it failed, when it did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ReportError>,
+}
+
+/// One asynchronous PostgreSQL server event observed while a script ran.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ServerMessage {
+    /// A PostgreSQL `NoticeResponse`, including all fields the driver exposes.
+    Notice(ServerNotice),
+    /// A PostgreSQL `NotificationResponse`, normally produced by `NOTIFY`.
+    Notification(ServerNotification),
+}
+
+/// A PostgreSQL notice or warning.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ServerNotice {
+    /// The server-supplied (and possibly localized) severity.
+    pub severity: String,
+    /// The five-character PostgreSQL SQLSTATE.
+    pub sqlstate: String,
+    /// The primary human-readable message.
+    pub message: String,
+    /// Additional server detail, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// A server-supplied action hint, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    /// Procedural-language or internal-query context, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    /// The schema of the related database object, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    /// The related table, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    /// The related column, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+    /// The related data type, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub datatype: Option<String>,
+    /// The related constraint, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub constraint: Option<String>,
+    /// The PostgreSQL source file reporting the message, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_file: Option<String>,
+    /// The PostgreSQL source line reporting the message, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_line: Option<u32>,
+    /// The PostgreSQL source routine reporting the message, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_routine: Option<String>,
+}
+
+/// A PostgreSQL asynchronous notification.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ServerNotification {
+    /// The notification channel.
+    pub channel: String,
+    /// The notification payload.
+    pub payload: String,
+    /// The sending backend PID.
+    pub process_id: i32,
 }
 
 /// Which of a migration's scripts ran.
@@ -533,6 +603,31 @@ mod tests {
         assert!(!json.contains("null"), "{json}");
         assert!(!json.contains("\"target\""), "{json}");
         assert!(!json.contains("\"error\""), "{json}");
+    }
+
+    #[test]
+    fn server_messages_round_trip_with_their_kind_and_optional_fields() {
+        let message = ServerMessage::Notice(ServerNotice {
+            severity: "NOTICE".to_owned(),
+            sqlstate: "00000".to_owned(),
+            message: "migration progress".to_owned(),
+            detail: None,
+            hint: Some("watch this".to_owned()),
+            context: None,
+            schema: None,
+            table: None,
+            column: None,
+            datatype: None,
+            constraint: None,
+            source_file: None,
+            source_line: None,
+            source_routine: None,
+        });
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(json.contains("\"kind\":\"notice\""), "{json}");
+        assert!(!json.contains("detail"), "{json}");
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ServerMessage::Notice(_)));
     }
 
     #[test]

@@ -44,6 +44,7 @@ pub async fn run(
         opened.timeouts,
     );
     let client = opened.connection.client;
+    let server_messages = opened.connection.server_messages;
     let held = lock::acquire(&client, config.config.project.id, wait).await?;
 
     // Every check below runs against state read *after* the lock was taken.
@@ -51,7 +52,16 @@ pub async fn run(
     // that depends on this one in between, and the leaf check would pass for a
     // migration that is no longer a leaf.
     let (client, outcome) = revert_under_lock(
-        config, graph, args, session, client, &schema, &name, facts, timeouts,
+        config,
+        graph,
+        args,
+        session,
+        client,
+        &schema,
+        &name,
+        facts,
+        timeouts,
+        server_messages,
     )
     .await;
 
@@ -74,6 +84,7 @@ async fn revert_under_lock(
     name: &str,
     facts: zapadka_pg::ServerFacts,
     timeouts: zapadka_pg::Timeouts,
+    server_messages: zapadka_pg::ServerMessages,
 ) -> (zapadka_pg::Client, Result<()>) {
     let state = match target::refresh_state(&client, config, schema).await {
         Ok(state) => state,
@@ -107,6 +118,7 @@ async fn revert_under_lock(
         facts,
         crate::session::VERSION.to_owned(),
         timeouts,
+        server_messages,
     );
     let outcome = revert_one(migration, session, &mut runner).await;
     (runner.into_client(), outcome)
@@ -137,6 +149,7 @@ async fn revert_one(
                     sha256: script.sha256.clone(),
                     status: Status::Failed,
                     duration_ms: None,
+                    server_messages: runner.take_server_messages(),
                     error: Some((&error).into()),
                 });
             }

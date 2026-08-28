@@ -54,6 +54,7 @@ pub async fn run(
         .unwrap_or(config.config.policy.advisory_lock_timeout);
 
     let client = opened.connection.client;
+    let server_messages = opened.connection.server_messages;
     let held = lock::acquire(&client, project_id, wait).await?;
 
     // Everything from here runs under the lock. The client comes back on every
@@ -69,6 +70,7 @@ pub async fn run(
         &opened.schema,
         opened.timeouts,
         opened.facts,
+        server_messages,
     )
     .await;
 
@@ -91,6 +93,7 @@ async fn deploy_under_lock(
     schema: &str,
     timeouts: zapadka_pg::Timeouts,
     facts: zapadka_pg::ServerFacts,
+    server_messages: zapadka_pg::ServerMessages,
 ) -> (zapadka_pg::Client, Result<()>) {
     // Read again now the lock is held. The state gathered while connecting is a
     // snapshot of a database another run may have been changing.
@@ -149,6 +152,7 @@ async fn deploy_under_lock(
         facts,
         crate::session::VERSION.to_owned(),
         timeouts,
+        server_messages,
     );
 
     let outcome = apply_all(&plan, graph, args, session, &mut runner).await;
@@ -219,6 +223,7 @@ async fn apply_one(
                 &migration.deploy.relative_path,
                 &migration.deploy.sha256,
                 &error,
+                runner.take_server_messages(),
             ));
             result.error = Some((&error).into());
             return (result, Some(error));
@@ -253,6 +258,7 @@ async fn apply_one(
                     &script.relative_path,
                     &script.sha256,
                     &error,
+                    runner.take_server_messages(),
                 ));
             }
             result.error = Some((&error).into());
@@ -262,13 +268,20 @@ async fn apply_one(
 }
 
 /// The report entry for a script that ran and failed.
-fn failed_script(role: ScriptRole, path: &str, sha256: &str, error: &Error) -> Script {
+fn failed_script(
+    role: ScriptRole,
+    path: &str,
+    sha256: &str,
+    error: &Error,
+    server_messages: Vec<zapadka_core::report::ServerMessage>,
+) -> Script {
     Script {
         role,
         path: path.to_owned(),
         sha256: sha256.to_owned(),
         status: Status::Failed,
         duration_ms: None,
+        server_messages,
         error: Some(error.into()),
     }
 }
@@ -301,6 +314,7 @@ pub fn script_of(outcome: &ScriptOutcome, status: Status) -> Script {
         sha256: outcome.sha256.clone(),
         status,
         duration_ms: Some(outcome.duration_ms),
+        server_messages: outcome.server_messages.clone(),
         error: None,
     }
 }

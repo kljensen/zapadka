@@ -15,13 +15,16 @@
 //! a private network — but Zapadka says so in the report unless the target
 //! asked for it with `sslmode=disable`.
 
+use std::sync::{Arc, Mutex};
+
 use rustls::ClientConfig;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
 use tokio_postgres::config::SslMode;
-use tokio_postgres::{Client, Config as PgConfig, NoTls};
+use tokio_postgres::{AsyncMessage, Client, Config as PgConfig, NoTls};
 use zapadka_core::config::TargetConfig;
 use zapadka_core::error::{Error, ErrorCode, Result, io_error};
+use zapadka_core::report::{ServerMessage, ServerNotice, ServerNotification};
 
 use crate::error::connection_failed;
 use crate::service;
@@ -58,6 +61,38 @@ pub struct Connection {
     pub encrypted: bool,
     /// Whether the target explicitly asked for an unencrypted connection.
     pub encryption_opted_out: bool,
+    /// PostgreSQL messages observed on this connection.
+    pub server_messages: ServerMessages,
+}
+
+/// A lossless, ordered collector for messages PostgreSQL sent to this client.
+#[derive(Clone, Default)]
+#[allow(missing_debug_implementations)] // retains server output, which can be sensitive
+pub struct ServerMessages(Arc<Mutex<Vec<ServerMessage>>>);
+
+impl ServerMessages {
+    /// Returns messages added since `cursor`, advancing it to the end.
+    pub fn since(&self, cursor: &mut usize) -> Vec<ServerMessage> {
+        let messages = self.0.lock().expect("server-message collector poisoned");
+        let events = messages[*cursor..].to_vec();
+        *cursor = messages.len();
+        events
+    }
+
+    /// The cursor at the current end of the stream.
+    pub fn cursor(&self) -> usize {
+        self.0
+            .lock()
+            .expect("server-message collector poisoned")
+            .len()
+    }
+
+    fn push(&self, message: ServerMessage) {
+        self.0
+            .lock()
+            .expect("server-message collector poisoned")
+            .push(message);
+    }
 }
 
 /// Everything needed to open a connection to a target.
@@ -347,14 +382,15 @@ pub async fn connect(resolved: &Resolved) -> Result<Connection> {
     let root_certificate = resolved.root_certificate.as_deref();
     let opted_out = config.get_ssl_mode() == SslMode::Disable;
 
-    let client = if opted_out {
+    let (client, server_messages) = if opted_out {
         let (client, connection) = config
             .connect(NoTls)
             .await
             .map_err(|error| connection_failed(error, source.describe()))?;
         // The task owns the socket and lives as long as the client does.
-        tokio::spawn(drive(connection));
-        client
+        let server_messages = ServerMessages::default();
+        tokio::spawn(drive(connection, server_messages.clone()));
+        (client, server_messages)
     } else {
         install_crypto_provider();
         let connector =
@@ -363,8 +399,9 @@ pub async fn connect(resolved: &Resolved) -> Result<Connection> {
             .connect(connector)
             .await
             .map_err(|error| connection_failed(error, source.describe()))?;
-        tokio::spawn(drive(connection));
-        client
+        let server_messages = ServerMessages::default();
+        tokio::spawn(drive(connection, server_messages.clone()));
+        (client, server_messages)
     };
 
     // Ask the server what actually happened rather than inferring it from the
@@ -400,6 +437,7 @@ pub async fn connect(resolved: &Resolved) -> Result<Connection> {
         database,
         encrypted,
         encryption_opted_out: opted_out,
+        server_messages,
     })
 }
 
@@ -418,14 +456,48 @@ fn install_crypto_provider() {
 }
 
 /// Drives a connection to completion in the background.
-async fn drive<S, T>(connection: tokio_postgres::Connection<S, T>)
+async fn drive<S, T>(mut connection: tokio_postgres::Connection<S, T>, messages: ServerMessages)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    // A connection error surfaces on the next query as a "connection closed"
-    // failure, which carries far more context than logging it here would.
-    let _ = connection.await;
+    // `Connection` as a Future silently consumes asynchronous messages. Drive
+    // it through `poll_message` instead so SQL-author output is not lost.
+    while let Some(message) = std::future::poll_fn(|cx| connection.poll_message(cx)).await {
+        match message {
+            Ok(AsyncMessage::Notice(notice)) => {
+                messages.push(ServerMessage::Notice(ServerNotice {
+                    severity: notice.severity().to_owned(),
+                    sqlstate: notice.code().code().to_owned(),
+                    message: notice.message().to_owned(),
+                    detail: notice.detail().map(str::to_owned),
+                    hint: notice.hint().map(str::to_owned),
+                    context: notice.where_().map(str::to_owned),
+                    schema: notice.schema().map(str::to_owned),
+                    table: notice.table().map(str::to_owned),
+                    column: notice.column().map(str::to_owned),
+                    datatype: notice.datatype().map(str::to_owned),
+                    constraint: notice.constraint().map(str::to_owned),
+                    source_file: notice.file().map(str::to_owned),
+                    source_line: notice.line(),
+                    source_routine: notice.routine().map(str::to_owned),
+                }))
+            }
+            Ok(AsyncMessage::Notification(notification)) => {
+                messages.push(ServerMessage::Notification(ServerNotification {
+                    channel: notification.channel().to_owned(),
+                    payload: notification.payload().to_owned(),
+                    process_id: notification.process_id(),
+                }));
+            }
+            // A connection error surfaces on the next query as a "connection
+            // closed" failure, which carries more context than logging here.
+            Err(_) => break,
+            // `AsyncMessage` is non-exhaustive. Preserve every variant this
+            // driver exposes today and keep driving safely if it gains one.
+            Ok(_) => {}
+        }
+    }
 }
 
 /// Builds the TLS configuration.

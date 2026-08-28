@@ -19,7 +19,7 @@ pub mod service;
 pub mod testlib;
 pub mod testrun;
 
-pub use connect::{Connection, Resolved, Source, connect, resolve};
+pub use connect::{Connection, Resolved, ServerMessages, Source, connect, resolve};
 pub use execute::{Runner, ScriptOutcome, Timeouts};
 pub use lock::DeploymentLock;
 pub use registry::{AppliedMigration, RegistryState, ServerFacts};

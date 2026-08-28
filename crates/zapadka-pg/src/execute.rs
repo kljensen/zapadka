@@ -44,6 +44,7 @@ use zapadka_core::error::{Error, Result};
 use zapadka_core::migration::Migration;
 use zapadka_core::report::ScriptRole;
 
+use crate::ServerMessages;
 use crate::error::{registry_failed, script_failed};
 use crate::registry::{self, ServerFacts, quote_identifier};
 
@@ -71,6 +72,8 @@ pub struct ScriptOutcome {
     pub sha256: String,
     /// How long the script took, in milliseconds.
     pub duration_ms: u64,
+    /// PostgreSQL messages emitted while the script ran.
+    pub server_messages: Vec<zapadka_core::report::ServerMessage>,
 }
 
 /// Executes migrations against one connection.
@@ -85,6 +88,8 @@ pub struct Runner {
     /// Orders events within this run. Events are append-only, so the sequence
     /// is what reconstructs the order things happened in.
     sequence: i32,
+    server_messages: ServerMessages,
+    message_cursor: usize,
 }
 
 impl Runner {
@@ -96,6 +101,7 @@ impl Runner {
         facts: ServerFacts,
         zapadka_version: String,
         timeouts: Timeouts,
+        server_messages: ServerMessages,
     ) -> Self {
         Self {
             client,
@@ -105,6 +111,8 @@ impl Runner {
             zapadka_version,
             timeouts,
             sequence: 0,
+            message_cursor: server_messages.cursor(),
+            server_messages,
         }
     }
 
@@ -116,6 +124,11 @@ impl Runner {
     /// The server facts observed at connection time.
     pub fn facts(&self) -> &ServerFacts {
         &self.facts
+    }
+
+    /// Drains messages delivered since the last script boundary.
+    pub fn take_server_messages(&mut self) -> Vec<zapadka_core::report::ServerMessage> {
+        self.server_messages.since(&mut self.message_cursor)
     }
 
     /// Applies one migration inside a transaction Zapadka owns.
@@ -158,6 +171,7 @@ impl Runner {
                     path,
                     sha256: migration.deploy.sha256.clone(),
                     duration_ms,
+                    server_messages: self.take_server_messages(),
                 })
             }
             Err(error) => {
@@ -304,6 +318,7 @@ impl Runner {
                     path,
                     sha256: migration.deploy.sha256.clone(),
                     duration_ms,
+                    server_messages: self.take_server_messages(),
                 })
             }
             // The attempt row stays on every failure, and the target stays
@@ -629,6 +644,7 @@ impl Runner {
             path: script.relative_path.clone(),
             sha256: script.sha256.clone(),
             duration_ms,
+            server_messages: self.take_server_messages(),
         }))
     }
 
@@ -744,6 +760,7 @@ impl Runner {
             path: script.relative_path.clone(),
             sha256: script.sha256.clone(),
             duration_ms,
+            server_messages: self.take_server_messages(),
         })
     }
 

@@ -13,8 +13,8 @@
 use std::io::Write;
 
 use zapadka_core::report::{
-    Action, AssertionStatus, Diagnostic, MigrationResult, Outcome, ReportError, ReportV1, Severity,
-    Status, TestFile,
+    Action, AssertionStatus, Diagnostic, MigrationResult, Outcome, ReportError, ReportV1,
+    ServerMessage, Severity, Status, TestFile,
 };
 
 /// Writes the human summary of `report`.
@@ -190,6 +190,41 @@ fn write_migration(
     if let Some(error) = &migration.error {
         for line in describe(error) {
             writeln!(out, "    {line}")?;
+        }
+    }
+    for script in &migration.scripts {
+        for message in &script.server_messages {
+            write_server_message(message, out)?;
+        }
+    }
+    Ok(())
+}
+
+fn write_server_message(message: &ServerMessage, out: &mut impl Write) -> std::io::Result<()> {
+    match message {
+        ServerMessage::Notice(notice) => {
+            writeln!(
+                out,
+                "  {}: {}",
+                notice.severity.to_ascii_lowercase(),
+                notice.message
+            )?;
+            if let Some(detail) = &notice.detail {
+                writeln!(out, "    detail: {detail}")?;
+            }
+            if let Some(hint) = &notice.hint {
+                writeln!(out, "    hint: {hint}")?;
+            }
+            if let Some(context) = &notice.context {
+                writeln!(out, "    context: {context}")?;
+            }
+        }
+        ServerMessage::Notification(notification) => {
+            writeln!(
+                out,
+                "  notification {}: {}",
+                notification.channel, notification.payload
+            )?;
         }
     }
     Ok(())
@@ -372,7 +407,10 @@ mod tests {
 
     use super::*;
     use uuid::Uuid;
-    use zapadka_core::report::{Location, REPORT_VERSION, Run, Tool, TransactionMode};
+    use zapadka_core::report::{
+        Location, REPORT_VERSION, Run, Script, ScriptRole, ServerMessage, ServerNotice,
+        ServerNotification, Tool, TransactionMode,
+    };
 
     fn report() -> ReportV1 {
         ReportV1 {
@@ -537,6 +575,56 @@ mod tests {
         );
         assert!(text.contains("[lint.destructive]"), "{text}");
         assert!(text.contains("1 warning"), "{text}");
+    }
+
+    #[test]
+    fn server_messages_are_shown_but_do_not_count_as_zapadka_warnings() {
+        let mut report = report();
+        let mut applied = migration(Status::Succeeded, Action::Deploy);
+        applied.scripts.push(Script {
+            role: ScriptRole::Deploy,
+            path: "migrations/x/deploy.sql".to_owned(),
+            sha256: "0".repeat(64),
+            status: Status::Succeeded,
+            duration_ms: Some(1),
+            server_messages: vec![
+                ServerMessage::Notice(ServerNotice {
+                    severity: "WARNING".to_owned(),
+                    sqlstate: "01000".to_owned(),
+                    message: "the SQL author meant this".to_owned(),
+                    detail: Some("more context".to_owned()),
+                    hint: None,
+                    context: None,
+                    schema: None,
+                    table: None,
+                    column: None,
+                    datatype: None,
+                    constraint: None,
+                    source_file: None,
+                    source_line: None,
+                    source_routine: None,
+                }),
+                ServerMessage::Notification(ServerNotification {
+                    channel: "migration_progress".to_owned(),
+                    payload: "done".to_owned(),
+                    process_id: 42,
+                }),
+            ],
+            error: None,
+        });
+        report.migrations.push(applied);
+
+        let text = render_to_string(&report);
+        assert!(
+            text.contains("warning: the SQL author meant this"),
+            "{text}"
+        );
+        assert!(text.contains("detail: more context"), "{text}");
+        assert!(
+            text.contains("notification migration_progress: done"),
+            "{text}"
+        );
+        assert!(!text.contains("1 warning"), "{text}");
     }
 
     #[test]

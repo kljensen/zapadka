@@ -65,6 +65,7 @@ pub async fn run(
         .wait
         .unwrap_or(config.config.policy.advisory_lock_timeout);
     let client = opened.connection.client;
+    let server_messages = opened.connection.server_messages;
     let held = lock::acquire(&client, config.config.project.id, wait).await?;
 
     // The client comes back on every path, so the lock is always released on
@@ -79,6 +80,7 @@ pub async fn run(
         &opened.schema,
         opened.timeouts,
         opened.facts,
+        server_messages,
     )
     .await;
 
@@ -101,6 +103,7 @@ async fn baseline_under_lock(
     schema: &str,
     timeouts: zapadka_pg::Timeouts,
     facts: zapadka_pg::ServerFacts,
+    server_messages: zapadka_pg::ServerMessages,
 ) -> (zapadka_pg::Client, Result<()>) {
     // Read again now the lock is held. Otherwise a concurrent revert could make
     // a migration pending between the read and the decision, and this run would
@@ -156,6 +159,7 @@ async fn baseline_under_lock(
         facts,
         crate::session::VERSION.to_owned(),
         timeouts,
+        server_messages,
     );
 
     let result = runner.baseline(&pending).await;
