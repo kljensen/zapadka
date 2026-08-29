@@ -111,7 +111,20 @@ pub fn parse(sql: &str) -> Result<ParsedScript, ParseError> {
 /// comment mapping, and deparses both together. This preserves comments in
 /// their intended statement context while normalizing syntactic spelling.
 pub fn format(sql: &str, options: FormatOptions) -> Result<String, ParseError> {
-    ffi::format(sql, options)
+    // libpg_query attaches source comments to the newly deparsed tree. On a
+    // few complex comment layouts that mapping changes whitespace once (for
+    // example an inline comment following a type option), so a single pass is
+    // not necessarily a canonical form. Iterate to the fixed point instead:
+    // callers of a formatter must be able to run it twice without a diff.
+    let mut formatted = ffi::format(sql, options)?;
+    for _ in 0..3 {
+        let next = ffi::format(&formatted, options)?;
+        if next == formatted {
+            return Ok(formatted);
+        }
+        formatted = next;
+    }
+    Ok(formatted)
 }
 
 /// Returns the `PG_VERSION_NUM` of the embedded parser without parsing a script.
@@ -173,25 +186,9 @@ mod tests {
 
     #[test]
     fn preserves_comments_from_pgformatter_regression_fixture() {
-        // Adapted from pgFormatter's PostgreSQL regression fixture:
-        // https://github.com/darold/pgFormatter/blob/master/t/pg-test-files/sql/comments.sql
-        // It deliberately mixes leading, embedded, trailing, and nested block
-        // comments — the cases a parse-tree-only formatter commonly loses.
-        let source = r#"
--- COMMENTS
-SELECT 'trailing' AS first; -- trailing single line
-SELECT /* embedded single line */ 'embedded' AS second;
-SELECT /* both embedded and trailing single line */ 'both' AS third; -- trailing single line
-
-/* This is an example of SQL which should not execute:
- * select 'multi-line';
- */
-SELECT 'after multi-line' AS fifth;
-
-/*
-SELECT 'trailing' as x1; -- inside block comment
-*/
-"#;
+        // Verbatim pgFormatter regression fixture. Its local provenance file
+        // records the upstream path and PostgreSQL-license terms.
+        let source = include_str!("../tests/fixtures/pgformatter-comments.sql");
         let formatted = format(source, FormatOptions::default()).unwrap();
         for comment in [
             "-- COMMENTS",
@@ -200,12 +197,35 @@ SELECT 'trailing' as x1; -- inside block comment
             "/* both embedded and trailing single line */",
             "This is an example of SQL which should not execute",
             "SELECT 'trailing' as x1; -- inside block comment",
+            "SELECT 'deepest nest' as n3;",
         ] {
             assert!(
                 formatted.contains(comment),
                 "missing {comment:?} in {formatted}"
             );
         }
+    }
+
+    #[test]
+    fn pgformatter_create_type_fixture_is_idempotent_and_reparseable() {
+        // Verbatim pgFormatter PostgreSQL regression fixture. It covers type
+        // options, shell and composite types, internal-language functions,
+        // comments, casts, and a long multi-statement script.
+        let source = include_str!("../tests/fixtures/pgformatter-create-type.sql");
+        assert_formatter_invariants(source);
+    }
+
+    #[test]
+    fn pganalyze_pretty_print_fixture_has_its_upstream_rendering() {
+        // Verbatim query and expected rendering from pganalyze/pg_query's
+        // deparse_pretty_print_spec.rb. This is deliberately an exact output
+        // test, complementing the larger invariant-only pgFormatter corpus.
+        let source = "SELECT a AS b\nFROM x\nWHERE\n    y = 5\n    AND z = y";
+        let options = FormatOptions {
+            trailing_newline: false,
+            ..FormatOptions::default()
+        };
+        assert_eq!(format(source, options).unwrap(), source);
     }
 
     #[test]
@@ -253,8 +273,14 @@ ALTER TABLE public.orders ADD COLUMN created_at timestamptz DEFAULT now();
             "COMMENT ON TABLE accounts IS 'customer accounts';",
         ];
         for source in corpus {
-            let formatted = format(source, FormatOptions::default()).unwrap();
-            parse(&formatted).unwrap();
+            assert_formatter_invariants(source);
         }
+    }
+
+    fn assert_formatter_invariants(source: &str) {
+        let once = format(source, FormatOptions::default()).unwrap();
+        let twice = format(&once, FormatOptions::default()).unwrap();
+        assert_eq!(once, twice, "formatter must be idempotent");
+        parse(&once).unwrap();
     }
 }

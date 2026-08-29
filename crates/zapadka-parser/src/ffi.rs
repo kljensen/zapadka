@@ -189,6 +189,12 @@ pub(crate) fn format(sql: &str, options: FormatOptions) -> Result<String, ParseE
         return Err(error);
     }
 
+    // libpg_query carries the original number of surrounding newlines on each
+    // comment. Refeeding a rendered query can otherwise compound those counts
+    // on every run. Zapadka's canonical style keeps one separating newline;
+    // the comment text and its statement attachment remain untouched.
+    unsafe { normalize_comment_spacing(&comments) };
+
     let deparsed = unsafe {
         pg_query_deparse_protobuf_opts(
             parsed.parse_tree,
@@ -221,6 +227,27 @@ pub(crate) fn format(sql: &str, options: FormatOptions) -> Result<String, ParseE
         pg_query_free_protobuf_parse_result(parsed);
     }
     outcome
+}
+
+/// Caps comment spacing so repeated parse/deparse passes converge.
+///
+/// # Safety
+///
+/// `result` must be a successful libpg_query comments result. Its pointer array
+/// and each non-null comment pointer are owned, initialized, and writable until
+/// `pg_query_free_deparse_comments_result` is called.
+unsafe fn normalize_comment_spacing(result: &PgQueryDeparseCommentsResult) {
+    // SAFETY: guaranteed by this function's safety contract. A zero-length
+    // slice is valid even when libpg_query uses a null pointer for no comments.
+    let comments = unsafe { std::slice::from_raw_parts_mut(result.comments, result.comment_count) };
+    for comment in comments {
+        if !comment.is_null() {
+            // SAFETY: non-null entries point at their owned, writable C structs.
+            let comment = unsafe { &mut **comment };
+            comment.newlines_before_comment = comment.newlines_before_comment.min(1);
+            comment.newlines_after_comment = comment.newlines_after_comment.min(1);
+        }
+    }
 }
 
 fn c_input(sql: &str) -> Result<CString, ParseError> {
