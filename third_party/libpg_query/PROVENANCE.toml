@@ -30,12 +30,13 @@ license = "BSD-3-Clause AND PostgreSQL"
 license_file = "LICENSE"
 
 purpose = """
-Provides the PostgreSQL 18 grammar Zapadka uses to decide whether a migration,
-verification, or test script tries to take over the runner's transaction
-boundary, how many top-level statements a nontransactional migration contains,
-and which statements `lint` should warn about. ADR-0002 requires parser fidelity
-with the supported PostgreSQL version, and ADR-0005 requires the parser to be
-statically embedded rather than dynamically linked.
+Provides the PostgreSQL 18 grammar and protobuf deparser Zapadka uses to decide
+whether a migration, verification, or test script tries to take over the
+runner's transaction boundary, how many top-level statements a
+nontransactional migration contains, which statements `lint` should warn about,
+and how `format` can rewrite SQL without losing its comments. ADR-0002 requires
+parser fidelity with the supported PostgreSQL version, and ADR-0005 requires
+the parser to be statically embedded rather than dynamically linked.
 """
 
 # The upstream tree also ships a C++ protobuf binding, a pg_regress-style test

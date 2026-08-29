@@ -65,6 +65,10 @@ fn dispatch(cli: &Cli, session: &mut Session) -> Result<()> {
             let (config, graph) = commands::load_project(&directory)?;
             commands::lint::run(&graph, &config.config.policy, session)
         }
+        Command::Format(args) => {
+            let (config, graph) = commands::load_project(&directory)?;
+            commands::format::run(&config, &graph, args, session)
+        }
 
         // Commands that talk to a database. One current-thread runtime per
         // run: Zapadka opens a single connection and does one thing at a time,

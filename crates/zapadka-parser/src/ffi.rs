@@ -10,7 +10,7 @@
 
 use std::ffi::{CStr, CString, c_char, c_int};
 
-use crate::ParseError;
+use crate::{FormatOptions, ParseError};
 
 #[repr(C)]
 struct PgQueryError {
@@ -30,9 +30,64 @@ struct PgQueryParseResult {
     error: *mut PgQueryError,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PgQueryProtobuf {
+    len: usize,
+    data: *mut c_char,
+}
+
+#[repr(C)]
+struct PgQueryProtobufParseResult {
+    parse_tree: PgQueryProtobuf,
+    stderr_buffer: *mut c_char,
+    error: *mut PgQueryError,
+}
+
+#[repr(C)]
+struct PgQueryDeparseResult {
+    query: *mut c_char,
+    error: *mut PgQueryError,
+}
+
+#[repr(C)]
+struct PostgresDeparseComment {
+    match_location: c_int,
+    newlines_before_comment: c_int,
+    newlines_after_comment: c_int,
+    str_: *mut c_char,
+}
+
+#[repr(C)]
+struct PgQueryDeparseCommentsResult {
+    comments: *mut *mut PostgresDeparseComment,
+    comment_count: usize,
+    error: *mut PgQueryError,
+}
+
+#[repr(C)]
+struct PostgresDeparseOpts {
+    comments: *mut *mut PostgresDeparseComment,
+    comment_count: usize,
+    pretty_print: bool,
+    indent_size: c_int,
+    max_line_length: c_int,
+    trailing_newline: bool,
+    commas_start_of_line: bool,
+}
+
 unsafe extern "C" {
     fn pg_query_parse(input: *const c_char) -> PgQueryParseResult;
     fn pg_query_free_parse_result(result: PgQueryParseResult);
+    fn pg_query_parse_protobuf(input: *const c_char) -> PgQueryProtobufParseResult;
+    fn pg_query_deparse_protobuf_opts(
+        parse_tree: PgQueryProtobuf,
+        options: PostgresDeparseOpts,
+    ) -> PgQueryDeparseResult;
+    fn pg_query_deparse_comments_for_query(input: *const c_char) -> PgQueryDeparseCommentsResult;
+    fn pg_query_free_protobuf_parse_result(result: PgQueryProtobufParseResult);
+    fn pg_query_free_deparse_result(result: PgQueryDeparseResult);
+    fn pg_query_free_deparse_comments_result(result: PgQueryDeparseCommentsResult);
 }
 
 /// Parses `sql` and returns the parse tree as JSON.
@@ -101,6 +156,110 @@ pub(crate) fn parse_to_json(sql: &str) -> Result<String, ParseError> {
     unsafe { pg_query_free_parse_result(result) };
 
     outcome
+}
+
+/// Formats `sql` through libpg_query's protobuf deparser.
+///
+/// The protobuf parse tree and comment mapping are deliberately kept in the C
+/// boundary: neither is part of Zapadka's public parser vocabulary, and each
+/// must be freed by the matching upstream function.
+pub(crate) fn format(sql: &str, options: FormatOptions) -> Result<String, ParseError> {
+    let input = c_input(sql)?;
+
+    // SAFETY: `input` is valid for all C calls below. Every returned allocation
+    // is copied into Rust before its matching upstream free function is called.
+    let parsed = unsafe { pg_query_parse_protobuf(input.as_ptr()) };
+    if !parsed.error.is_null() {
+        let error = unsafe { parse_error(&*parsed.error, sql) };
+        // SAFETY: `parsed` came from pg_query_parse_protobuf and is not reused.
+        unsafe { pg_query_free_protobuf_parse_result(parsed) };
+        return Err(error);
+    }
+
+    // Comments are not present in PostgreSQL parse trees. Ask libpg_query for
+    // its source-to-node mapping and pass it straight back to the deparser.
+    let comments = unsafe { pg_query_deparse_comments_for_query(input.as_ptr()) };
+    if !comments.error.is_null() {
+        let error = unsafe { parse_error(&*comments.error, sql) };
+        // SAFETY: both values came from their respective libpg_query calls.
+        unsafe {
+            pg_query_free_deparse_comments_result(comments);
+            pg_query_free_protobuf_parse_result(parsed);
+        }
+        return Err(error);
+    }
+
+    let deparsed = unsafe {
+        pg_query_deparse_protobuf_opts(
+            parsed.parse_tree,
+            PostgresDeparseOpts {
+                comments: comments.comments,
+                comment_count: comments.comment_count,
+                pretty_print: options.pretty_print,
+                indent_size: c_int::from(options.indent_size),
+                max_line_length: c_int::from(options.max_line_length),
+                trailing_newline: options.trailing_newline,
+                commas_start_of_line: options.commas_start_of_line,
+            },
+        )
+    };
+
+    let outcome = if deparsed.error.is_null() {
+        // SAFETY: successful deparse results contain a valid NUL-terminated query.
+        Ok(unsafe { CStr::from_ptr(deparsed.query) }
+            .to_string_lossy()
+            .into_owned())
+    } else {
+        // SAFETY: a non-null error is initialized and owned by `deparsed`.
+        Err(unsafe { parse_error(&*deparsed.error, sql) })
+    };
+
+    // SAFETY: each value is freed exactly once after all Rust copies are made.
+    unsafe {
+        pg_query_free_deparse_result(deparsed);
+        pg_query_free_deparse_comments_result(comments);
+        pg_query_free_protobuf_parse_result(parsed);
+    }
+    outcome
+}
+
+fn c_input(sql: &str) -> Result<CString, ParseError> {
+    CString::new(sql).map_err(|error| {
+        let offset = error.nul_position();
+        let (line, column) = line_and_column(sql, offset);
+        ParseError {
+            message: "script contains a NUL byte".to_owned(),
+            line,
+            column,
+            offset: Some(offset),
+        }
+    })
+}
+
+/// Copies an upstream error before its owning result is freed.
+unsafe fn parse_error(error: &PgQueryError, sql: &str) -> ParseError {
+    let message = if error.message.is_null() {
+        "syntax error".to_owned()
+    } else {
+        // SAFETY: non-null error messages are valid C strings by libpg_query's API.
+        unsafe { CStr::from_ptr(error.message) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    let offset = usize::try_from(error.cursorpos)
+        .ok()
+        .and_then(|position| position.checked_sub(1))
+        .map(|characters| byte_offset_of_character(sql, characters));
+    let (line, column) = match offset {
+        Some(offset) => line_and_column(sql, offset),
+        None => (1, 1),
+    };
+    ParseError {
+        message,
+        line,
+        column,
+        offset,
+    }
 }
 
 /// Converts a 0-based character index into a byte offset.

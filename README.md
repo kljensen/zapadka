@@ -19,12 +19,13 @@ zapadka init
 zapadka new add-orders-table
 # edit migrations/<id>-add-orders-table/deploy.sql
 zapadka lint
+zapadka format --check
 zapadka deploy --target production
 zapadka status --target production
 ```
 
-The full command set is `init`, `new`, `lint`, `status`, `deploy`, `verify`,
-`revert`, `baseline`, and `test`.
+The full command set is `init`, `new`, `lint`, `format`, `status`, `deploy`,
+`verify`, `revert`, `baseline`, and `test`.
 
 ## What makes it different
 
@@ -58,6 +59,14 @@ recorded as assertions rather than observations.
 **Deployed history is immutable.** Editing a migration that has already been
 applied is a hard error, not a warning and not a silent re-run. Corrective work
 is a new migration, which leaves both facts in the history.
+
+**Formatting is PostgreSQL-aware.** `zapadka format --check` verifies migration
+scripts and `tests/db/**/*.sql`, or only the paths supplied to it, using the
+same pinned PostgreSQL 18 parser as linting. `zapadka format --write` rewrites
+only the selected files, atomically. It refuses to rewrite `deploy.sql` unless
+you pass `--allow-deploy-rewrite`, because that changes a migration's immutable
+definition. Formatting preserves SQL comments, but does not format a language
+body embedded inside a dollar-quoted function literal.
 
 **Verification is separate from testing.** `verify.sql` is plain,
 production-safe SQL that runs after its migration commits, in a fresh

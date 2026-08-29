@@ -65,6 +65,36 @@ pub struct ParseError {
     pub offset: Option<usize>,
 }
 
+/// Options for PostgreSQL's canonical SQL deparser.
+///
+/// The defaults intentionally define Zapadka's single project style: four
+/// spaces, 80 columns, trailing newline, and conventional trailing commas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FormatOptions {
+    /// Whether to emit multiline, indented SQL.
+    pub pretty_print: bool,
+    /// Spaces per indentation level.
+    pub indent_size: u16,
+    /// Preferred maximum rendered line width.
+    pub max_line_length: u16,
+    /// Whether to end the result with one newline.
+    pub trailing_newline: bool,
+    /// Whether commas begin rather than end list lines.
+    pub commas_start_of_line: bool,
+}
+
+impl Default for FormatOptions {
+    fn default() -> Self {
+        Self {
+            pretty_print: true,
+            indent_size: 4,
+            max_line_length: 80,
+            trailing_newline: true,
+            commas_start_of_line: false,
+        }
+    }
+}
+
 /// Parses a SQL script with the pinned PostgreSQL 18 parser.
 ///
 /// Syntax and structure only. This does not check that referenced objects
@@ -73,6 +103,15 @@ pub struct ParseError {
 pub fn parse(sql: &str) -> Result<ParsedScript, ParseError> {
     let tree = ffi::parse_to_json(sql)?;
     Ok(classify::classify(&tree, sql))
+}
+
+/// Formats PostgreSQL SQL with the pinned libpg_query deparser.
+///
+/// Zapadka parses to libpg_query's protobuf tree, obtains its accompanying
+/// comment mapping, and deparses both together. This preserves comments in
+/// their intended statement context while normalizing syntactic spelling.
+pub fn format(sql: &str, options: FormatOptions) -> Result<String, ParseError> {
+    ffi::format(sql, options)
 }
 
 /// Returns the `PG_VERSION_NUM` of the embedded parser without parsing a script.
@@ -130,5 +169,92 @@ mod tests {
                 .statements
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn preserves_comments_from_pgformatter_regression_fixture() {
+        // Adapted from pgFormatter's PostgreSQL regression fixture:
+        // https://github.com/darold/pgFormatter/blob/master/t/pg-test-files/sql/comments.sql
+        // It deliberately mixes leading, embedded, trailing, and nested block
+        // comments — the cases a parse-tree-only formatter commonly loses.
+        let source = r#"
+-- COMMENTS
+SELECT 'trailing' AS first; -- trailing single line
+SELECT /* embedded single line */ 'embedded' AS second;
+SELECT /* both embedded and trailing single line */ 'both' AS third; -- trailing single line
+
+/* This is an example of SQL which should not execute:
+ * select 'multi-line';
+ */
+SELECT 'after multi-line' AS fifth;
+
+/*
+SELECT 'trailing' as x1; -- inside block comment
+*/
+"#;
+        let formatted = format(source, FormatOptions::default()).unwrap();
+        for comment in [
+            "-- COMMENTS",
+            "-- trailing single line",
+            "/* embedded single line */",
+            "/* both embedded and trailing single line */",
+            "This is an example of SQL which should not execute",
+            "SELECT 'trailing' as x1; -- inside block comment",
+        ] {
+            assert!(
+                formatted.contains(comment),
+                "missing {comment:?} in {formatted}"
+            );
+        }
+    }
+
+    #[test]
+    fn formatting_is_idempotent_and_preserves_statement_classification() {
+        // The CREATE FUNCTION shape is adapted from pgFormatter's upstream
+        // PostgreSQL regression corpus (create_function_3.sql). Dollar quoted
+        // bodies must remain literals to the outer SQL formatter.
+        let source = r#"
+CREATE TABLE public.orders(id bigint primary key, state text not null);
+CREATE FUNCTION public.order_count() RETURNS integer LANGUAGE sql AS $$
+  SELECT count(*)::integer FROM public.orders;
+$$;
+ALTER TABLE public.orders ADD COLUMN created_at timestamptz DEFAULT now();
+"#;
+        let once = format(source, FormatOptions::default()).unwrap();
+        let twice = format(&once, FormatOptions::default()).unwrap();
+        assert_eq!(once, twice);
+
+        let original_kinds: Vec<_> = parse(source)
+            .unwrap()
+            .statements
+            .into_iter()
+            .map(|statement| statement.kind)
+            .collect();
+        let formatted_kinds: Vec<_> = parse(&once)
+            .unwrap()
+            .statements
+            .into_iter()
+            .map(|statement| statement.kind)
+            .collect();
+        assert_eq!(original_kinds, formatted_kinds);
+    }
+
+    #[test]
+    fn upstream_style_corpus_always_reparses_after_formatting() {
+        // Small, representative cases adapted from pgFormatter's PostgreSQL
+        // regression inputs. Keeping this as a corpus test complements the
+        // exact comment case above and protects the C deparser boundary from
+        // crashes on varied, valid PostgreSQL syntax.
+        let corpus = [
+            "SELECT a, count(*) FROM accounts WHERE active GROUP BY a ORDER BY a;",
+            "CREATE INDEX CONCURRENTLY accounts_email_idx ON accounts (lower(email));",
+            "ALTER TABLE accounts ADD CONSTRAINT accounts_email_key UNIQUE (email);",
+            "WITH changed AS (UPDATE accounts SET active = true RETURNING id) SELECT * FROM changed;",
+            "COMMENT ON TABLE accounts IS 'customer accounts';",
+        ];
+        for source in corpus {
+            let formatted = format(source, FormatOptions::default()).unwrap();
+            parse(&formatted).unwrap();
+        }
     }
 }

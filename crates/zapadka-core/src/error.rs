@@ -119,6 +119,10 @@ pub enum ErrorCode {
     SelectorMatchedNothing,
     /// Lint found at least one hard error.
     LintFailed,
+    /// One or more selected SQL files are not in Zapadka's canonical format.
+    FormatCheckFailed,
+    /// `format --write` was asked to rewrite an immutable deploy script.
+    FormatDeployRewriteDenied,
 
     // -- Generic -----------------------------------------------------------
     /// A filesystem operation failed.
@@ -170,6 +174,8 @@ impl ErrorCode {
             Self::AlreadyExists => "project.already_exists",
             Self::SelectorMatchedNothing => "selector.matched_nothing",
             Self::LintFailed => "lint.failed",
+            Self::FormatCheckFailed => "format.check_failed",
+            Self::FormatDeployRewriteDenied => "format.deploy_rewrite_denied",
             Self::Io => "io.error",
             Self::Internal => "internal",
         }
@@ -209,7 +215,9 @@ impl ErrorCode {
             | Self::ScriptStatementCount
             | Self::ScriptEmpty
             | Self::ExecutionModeUnsupported
-            | Self::LintFailed => ExitCode::Validation,
+            | Self::LintFailed
+            | Self::FormatCheckFailed
+            | Self::FormatDeployRewriteDenied => ExitCode::Validation,
 
             Self::HistoryMigrationMissing
             | Self::HistoryDefinitionChanged
@@ -505,7 +513,7 @@ mod tests {
     }
 
     /// Every code, so the tests above fail when a new one is added carelessly.
-    const ALL_CODES: [ErrorCode; 38] = [
+    const ALL_CODES: [ErrorCode; 40] = [
         ErrorCode::ConfigNotFound,
         ErrorCode::ConfigInvalid,
         ErrorCode::ConfigUnsupportedFormatVersion,
@@ -542,6 +550,8 @@ mod tests {
         ErrorCode::AlreadyExists,
         ErrorCode::SelectorMatchedNothing,
         ErrorCode::LintFailed,
+        ErrorCode::FormatCheckFailed,
+        ErrorCode::FormatDeployRewriteDenied,
         ErrorCode::Io,
         ErrorCode::Internal,
     ];

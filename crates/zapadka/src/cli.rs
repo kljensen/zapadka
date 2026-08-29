@@ -1,7 +1,7 @@
 //! The command-line surface.
 
 use camino::Utf8PathBuf;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use zapadka_core::duration::Timeout;
 
 /// A static PostgreSQL migration and database-test tool.
@@ -48,6 +48,9 @@ pub enum Command {
     /// Validate migrations without connecting to a database.
     Lint,
 
+    /// Check or rewrite SQL using Zapadka's canonical PostgreSQL formatter.
+    Format(FormatArgs),
+
     /// Compare the checked-out graph with what the target has applied.
     Status(TargetArgs),
 
@@ -77,6 +80,7 @@ impl Command {
             Self::Init(_) => "init",
             Self::New(_) => "new",
             Self::Lint => "lint",
+            Self::Format(_) => "format",
             Self::Status(_) => "status",
             Self::Deploy(_) => "deploy",
             Self::Verify(_) => "verify",
@@ -86,6 +90,27 @@ impl Command {
             Self::Resolve(_) => "resolve",
         }
     }
+}
+
+/// Options for `zapadka format`.
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("mode").required(true).args(["check", "write"])))]
+pub struct FormatArgs {
+    /// SQL files to format. Without paths, format migration scripts and tests/db/**/*.sql.
+    #[arg(value_name = "PATH")]
+    pub paths: Vec<Utf8PathBuf>,
+
+    /// Fail if any selected file differs from canonical formatting.
+    #[arg(long, conflicts_with = "write")]
+    pub check: bool,
+
+    /// Atomically rewrite selected files that differ from canonical formatting.
+    #[arg(long, conflicts_with = "check")]
+    pub write: bool,
+
+    /// Permit rewriting deploy.sql, which changes a migration's immutable definition.
+    #[arg(long, requires = "write")]
+    pub allow_deploy_rewrite: bool,
 }
 
 #[derive(Debug, Args)]

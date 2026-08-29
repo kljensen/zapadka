@@ -6,6 +6,7 @@
 
 pub mod baseline;
 pub mod deploy;
+pub mod format;
 pub mod init;
 pub mod lint;
 pub mod new;
