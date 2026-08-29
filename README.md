@@ -1,18 +1,15 @@
 # Zapadka
 
-A static PostgreSQL migration and database-test tool, inspired by Sqitch and pgTAP.
+Zapadka is a [PostgreSQL](https://www.postgresql.org/) migration, testing, and formatting tool packaged
+as single static binary. It's basically a convenient Frankenstein's monster mashup of
+[Sqitch](https://github.com/sqitchers/sqitch),
+[pgTAP](https://github.com/theory/pgtap),
+and [pg_format](https://github.com/darold/pgformatter).
 
-One binary. No Perl, no `psql`, no libpq, no OpenSSL, no PostgreSQL client
-installation, and no separately installed test framework.
+I built it for myself and it is what I use for most of my projects
+using Postgres.
 
-> **Status: early.** Every command below works and is tested against
-> PostgreSQL 18. See [Limitations](#limitations).
-
-## What it is
-
-Zapadka deploys **authored SQL migrations** — reviewed source artifacts, not
-schema diffs and not a DDL DSL — and records what it did in a registry inside
-the database it changed.
+## TLDR
 
 ```sh
 zapadka init
@@ -24,61 +21,54 @@ zapadka deploy --target production
 zapadka status --target production
 ```
 
-The full command set is `init`, `new`, `lint`, `format`, `status`, `deploy`,
+The whole command set is `init`, `new`, `lint`, `format`, `status`, `deploy`,
 `verify`, `revert`, `baseline`, and `test`.
 
-## What makes it different
+## The basic idea
 
-**Migrations form a graph, not a list.** Each migration has a permanent UUIDv7
-identity and declares which migrations must precede it. Two branches can add
-migrations independently and converge without renumbering anything. Deployment
-order is a deterministic topological sort, so the same graph always produces the
-same plan.
+Zapadka keeps authored SQL migrations. There is no schema-diff magic and no DSL
+to learn: the SQL you review is the SQL that runs. It keeps a registry in the
+database, so it can tell what happened there instead of guessing from the files
+in your checkout.
 
-**Zapadka owns every transaction boundary.** A migration script cannot `BEGIN`,
-`COMMIT`, `ROLLBACK`, or `SAVEPOINT` — a pinned PostgreSQL 18 parser is compiled
-into the binary and rejects it before anything runs. So a migration's SQL and
-the row recording it as applied commit together: a crash leaves both or neither.
+Migrations are a graph rather than a numbered list. Each one has a permanent
+UUIDv7 identity and says what needs to come before it. That means two branches
+can add migrations independently and later meet without a renumbering ritual.
+When it deploys, Zapadka topologically sorts the graph deterministically.
 
-That guarantee covers what PostgreSQL rolls back, and no more. A script that
-advances a sequence and then fails leaves the sequence advanced while Zapadka
-records the migration as not applied — `nextval()` is not transactional.
+I also wanted transaction boundaries to be boring. Zapadka owns them: a normal
+migration cannot contain `BEGIN`, `COMMIT`, `ROLLBACK`, or `SAVEPOINT`. The
+PostgreSQL 18 parser inside the binary catches that before anything runs. A
+migration's SQL and its “applied” registry row therefore commit together: after
+a crash, you get both or neither.
 
-**So the registry is checked against the database, not trusted on its own.**
-Each migration's `verify.sql` runs automatically after that migration commits,
-and a failure stops the run: the registry says a migration is applied, and
-verification is what makes that claim answerable. `zapadka test` checks further
-and more broadly. Both inspect the real catalog and real rows.
+That only promises what PostgreSQL promises. For example, `nextval()` is not
+transactional, so a failed migration can leave a sequence advanced even though
+the migration was not recorded as applied.
 
-What Zapadka does *not* do is check continuously. Nothing re-examines the
-schema between runs, so a change made outside Zapadka goes unnoticed until you
-next verify or test — and `baseline` and `resolve` deliberately write applied
-rows on an operator's word, both requiring an explicit acknowledgement and both
-recorded as assertions rather than observations.
+Already-deployed migrations are immutable. Editing one is a hard error, not a
+warning and definitely not an invitation to silently run it again. Make a new
+migration for a correction; then the history says what actually happened.
 
-**Deployed history is immutable.** Editing a migration that has already been
-applied is a hard error, not a warning and not a silent re-run. Corrective work
-is a new migration, which leaves both facts in the history.
+## Formatting, verification, and tests
 
-**Formatting is PostgreSQL-aware.** `zapadka format --check` verifies migration
-scripts and `tests/db/**/*.sql`, or only the paths supplied to it, using the
-same pinned PostgreSQL 18 parser as linting. `zapadka format --write` rewrites
-only the selected files, atomically. It refuses to rewrite `deploy.sql` unless
-you pass `--allow-deploy-rewrite`, because that changes a migration's immutable
-definition. Formatting preserves SQL comments, but does not format a language
-body embedded inside a dollar-quoted function literal.
+`zapadka format --check` checks migration scripts and `tests/db/**/*.sql` (or
+just the paths you give it) with that same PostgreSQL-aware parser. `--write`
+rewrites selected files atomically. It refuses to rewrite a `deploy.sql` unless
+you explicitly add `--allow-deploy-rewrite`, because formatting a deployed
+migration changes its definition. Comments survive formatting; code inside a
+dollar-quoted function body is left alone.
 
-**Verification is separate from testing.** `verify.sql` is plain,
-production-safe SQL that runs after its migration commits, in a fresh
-**read-only** transaction that is always rolled back. It observes committed
-state and cannot change it. Database tests are a separate command against an
-explicit test target.
+Each migration can have a `verify.sql`. Zapadka runs it after the migration has
+committed, on a fresh read-only transaction that it always rolls back. This is
+the small, production-safe check that answers “did that migration leave the
+database in the state I meant?” It is deliberately not continuous monitoring:
+changes made outside Zapadka are noticed next time you verify or test.
 
-Read-only as well as rolled back, because rollback alone is not enough:
-PostgreSQL does not roll back `nextval()`, so a verification script that touched
-a sequence would advance it permanently. The cost is that a read-only
-transaction refuses every `CREATE`, including `CREATE TEMP TABLE` — build an
-expected set with a CTE or a `VALUES` list instead:
+Read-only matters as well as rollback. PostgreSQL will not roll back `nextval()`,
+so verification cannot touch a sequence by accident. The tradeoff is that it
+also cannot do `CREATE TEMP TABLE`; use a CTE or `VALUES` list for expected data
+instead.
 
 ```sql
 WITH expected(id) AS (VALUES (1::bigint), (2::bigint))
@@ -86,14 +76,17 @@ SELECT 1 / (CASE WHEN (SELECT count(*) FROM app.orders)
                  = (SELECT count(*) FROM expected) THEN 1 ELSE 0 END);
 ```
 
-**Tests are SQL, and so are their results.** `zapadka test` ships a SQL
-assertion library that installs into a reserved schema on a test target — no
-extension, no `CREATE EXTENSION`, nothing on the server's filesystem.
+`zapadka test` is the bigger, separate database-test runner. Every test file
+gets a fresh connection and a transaction Zapadka rolls back, so tests cannot
+see one another's data. The exception is sequences: Zapadka will tell you when
+one advanced, but will not rewind it and risk handing an application connection
+an id it has already seen.
 
-The API is **pgTAP-inspired and deliberately divergent**. The names and
-arguments are pgTAP's, because that is a good API a lot of people already know,
-and many pgTAP files port unchanged. It is not a compatibility contract: where
-pgTAP is showing its age, this improves on it. The differences are listed below.
+Tests use a bundled SQL assertion library. It is inspired by pgTAP, but it is
+not pgTAP and it does not emit TAP. There is no extension to install and nothing
+to put on the server filesystem. Assertions record typed result rows that
+Zapadka reads directly, which gives useful differences instead of two strings
+to squint at.
 
 ```sql
 SELECT has_table_in('app', 'orders');
@@ -105,49 +98,28 @@ SELECT set_eq(
 SELECT throws_ok($$INSERT INTO app.orders VALUES (1)$$, '23505');
 ```
 
-It is not pgTAP, and it emits no TAP. Assertions record **typed rows** — outcome,
-number, directive, and structured detail — which Zapadka reads directly. So a
-failure can say which rows differed and what their types were, rather than
-handing you two rendered strings to compare by eye:
+For example, a failed set comparison can carry the actual missing and extra
+rows, including their PostgreSQL types:
 
 ```json
 { "columns": [{"name": "id", "type": "bigint"}],
   "missing": [[2]], "extra": [[3]], "missing_count": 1, "extra_count": 1 }
 ```
 
-Assertions return `boolean`, so a file stays readable in `psql`. `plan()` and
-`finish()` are supported but never required: `1..N` existed so a *text* consumer
-could spot a truncated stream, and there is no text consumer. A declared plan is
-enforced. A test file may return whatever it likes; only its assertions count.
+`plan()` and `finish()` work if you want them, but you do not need them.
+Assertions return `boolean`, so the SQL is still pleasant to read in `psql`.
 
-**Where it diverges from pgTAP, and why:**
+### A few intentional pgTAP differences
 
-| Difference | Reason |
+| Difference | Why |
 |---|---|
-| `throws_ok`'s third argument is the description | pgTAP makes it the expected *message* whenever the second argument happens to be five bytes long. An argument that changes meaning by the length of another argument is a trap; it caught this library's author, then caught the test written to check it. `throws_sqlstate(sql, code, description)` infers nothing. A file in pgTAP's order is **refused**, not reinterpreted. |
-| `has_table_in('app', 'orders')` and friends | `has_table('app', 'orders')` does not mean (schema, table): two bare literals are `unknown`, PostgreSQL prefers `text`, so it checks a table named `app`. pgTAP has the same hazard. The `_in` forms always mean (schema, object). The pgTAP spellings still work. |
-| `has_view` counts materialised views | A materialised view exists. pgTAP checks `relkind = 'v'` only. |
-| No `runtests`, `do_tap`, `check_test`, `pgtap_version` | TAP harness machinery with nothing to harness. Omitted rather than stubbed, so a file using them fails loudly. |
-| A test file must not open its own transaction | The runner owns it, so no test can escape rollback. Drop the `begin;` / `rollback;` a pgTAP file carries. |
+| `throws_ok`'s third argument is the description | pgTAP treats it as an expected message whenever the second argument happens to be five bytes long. That is surprising enough to be a footgun. Use `throws_sqlstate(sql, code, description)` when you want to be explicit. A file in pgTAP's ambiguous order is refused, not guessed at. |
+| `has_table_in('app', 'orders')` and friends | Two untyped string literals are not reliably interpreted as schema and table by PostgreSQL. The `_in` forms always are. The pgTAP spellings still work. |
+| `has_view` includes materialized views | A materialized view exists; it should count. |
+| No `runtests`, `do_tap`, `check_test`, or `pgtap_version` | They are TAP-harness plumbing and there is no TAP harness here. Leaving them out makes accidental use obvious. |
+| Test files cannot open their own transaction | The runner owns it so a test cannot escape rollback. Remove the `begin;` / `rollback;` from a pgTAP file. |
 
-**Database tests are isolated, with one documented exception.** Each test file
-runs on a fresh connection in a transaction Zapadka always rolls back, so no
-file can see another's data. PostgreSQL does not roll back `nextval()`, and
-Zapadka will not rewind a sequence — its lock serializes Zapadka runs but not
-application connections, so rewinding could hand out a key already issued.
-A run that advances a sequence says so; assert on what a row contains rather
-than on the id it was given.
-
-**Nothing is reverted automatically.** If verification fails after a migration
-committed, Zapadka records that and stops. It does not run unproven revert SQL
-against an unexpected schema while nobody is watching.
-
-**One report, two renderings.** Every command produces the same versioned
-`ReportV1`. `--output json` writes exactly one document to stdout; human output
-is a view over the same value, and never changes shape based on whether stdout
-is a terminal.
-
-## Project layout
+## What a project looks like
 
 ```text
 zapadka.toml
@@ -161,9 +133,9 @@ tests/db/
   **/*.sql
 ```
 
-`zapadka.toml` is checked in and holds **no credentials**. A target names where
-to find its connection details — a PostgreSQL service entry or an environment
-variable — and Zapadka resolves it at run time.
+`zapadka.toml` goes in the repository and has no credentials. A target only
+says where to find connection details: a PostgreSQL service entry or an
+environment variable.
 
 ```toml
 format_version = 1
@@ -184,22 +156,21 @@ advisory_lock_timeout = "5s"
 deny = ["lint.index_without_concurrently"]
 ```
 
-## Safety checks
+Every command produces the same versioned `ReportV1`. `--output json` writes
+one document to stdout; human output is just another view of that same result.
 
-`zapadka lint` separates two kinds of finding, and the distinction is the
-point.
+## The checks that are supposed to save you
 
-**Errors** are provable invalidity — the script does not parse, it takes the
-transaction boundary away from the runner, or PostgreSQL will certainly refuse
-it in the declared mode. These always fail; there is no way to accept them,
-because accepting them would just move the failure to production.
+`zapadka lint` has errors and warnings, and I think the distinction is useful.
+Errors are things Zapadka can prove are wrong: invalid SQL, a script taking over
+transaction control, or PostgreSQL certainly refusing it in the declared mode.
+They always fail.
 
-**Warnings** are intentional operational risks: dropping data, rewriting a
-table, taking a lock that blocks writes. Zapadka cannot know whether one
-matters — dropping a column is reckless on a hot table and routine on an empty
-one — so it reports rather than refuses. A project promotes the ones it cares
-about with `policy.deny`; a migration accepts a specific one with an `[[allow]]`
-entry that states a reason.
+Warnings are operational risks such as dropping data, rewriting a table, or
+building an index that blocks writes. Zapadka cannot know whether a particular
+one is fine for *your* database, so it tells you rather than pretending it can
+decide. Put rules you care about in `policy.deny`; allow a specific warning in a
+migration with an `[[allow]]` entry and a reason.
 
 ```
 warning: migrations/019.../deploy.sql:3: builds an index on app.orders without CONCURRENTLY
@@ -208,9 +179,65 @@ warning: migrations/019.../deploy.sql:3: builds an index on app.orders without C
   existing rows, build it CONCURRENTLY in its own nontransactional migration
 ```
 
+There is no automatic revert. If verification fails after a migration committed,
+Zapadka records that and stops. Running unproven revert SQL against an unknown
+schema while nobody is looking is not a useful kind of automation.
+
+`baseline` and `resolve` can write applied rows on an operator's word. They
+require an explicit acknowledgement and record an assertion, rather than
+pretending Zapadka observed something it did not.
+
+## Nontransactional migrations
+
+Some PostgreSQL commands, notably `CREATE INDEX CONCURRENTLY`, cannot run in a
+transaction. Declare `transaction = "forbidden"` for one of those migrations.
+Zapadka permits exactly one statement, which gives an interrupted run one clear
+question instead of several.
+
+The usual all-or-nothing guarantee simply does not exist here. Zapadka writes
+down the attempt *before* it sends the statement, so if the connection dies it
+does not pretend to know the answer:
+
+```console
+$ zapadka deploy
+error: the connection failed while running migrations/.../deploy.sql, so whether
+       its statement took effect is unknown  [deploy.outcome_unknown]
+```
+
+That target is then blocked. `status` still works, but commands that would make
+changes refuse to build a plan on top of a gap. A server-side error blocks it
+too: `CREATE INDEX CONCURRENTLY` can leave an invalid index behind, so “it
+failed” is not proof that nothing happened.
+
+Look at the database, clean up if needed, then tell Zapadka what you found:
+
+```sh
+zapadka resolve <id> --applied      # it took effect; record it
+zapadka resolve <id> --not-applied  # it did not; let a deploy try again
+```
+
+Those become `asserted_applied` or `asserted_not_applied` history entries with
+the role that made the call. `--not-applied` only records that claim; it cannot
+clean up a partial statement for you.
+
+## Connecting safely
+
+Zapadka reads PostgreSQL service files itself and uses `rustls` for TLS. If it
+encrypts, it verifies the server identity. In other words, its `require` mode
+is stricter than libpq's: an untrusted certificate is refused rather than
+quietly accepted. Provide a private CA with `sslrootcert`. Unencrypted
+connections are fine on a private network, but Zapadka says so in the report
+unless the target explicitly uses `sslmode=disable`.
+
+Connect as a role that owns the schema, and no more. The runner controls when
+your SQL runs, not what that SQL is allowed to do. A role with `SUPERUSER`,
+`pg_execute_server_program`, or `pg_write_server_files` can reach outside the
+database; no transaction can make that safe. Zapadka does not deploy as a
+superuser, and neither should you.
+
 ## Exit codes
 
-Scripts branch on these; they are a stable contract.
+Scripts can rely on these.
 
 | Code | Meaning |
 |---|---|
@@ -225,94 +252,21 @@ Scripts branch on these; they are a stable contract.
 | 9 | User SQL failed |
 | 70 | A bug in Zapadka |
 
-The `error.code` field in the JSON report carries the specific reason. Match on
-that and on the exit code, never on message text.
+For a script, use the exit code and `error.code` in the JSON report—not a
+human-readable message.
 
-## Connecting
+## Requirements and limitations
 
-Zapadka reads PostgreSQL service files itself and speaks TLS with `rustls`.
+- PostgreSQL 18 or newer. Zapadka uses the PostgreSQL 18 grammar to make its
+  safety calls and will not bluff about older servers.
+- Released binaries cover Linux x86_64 and aarch64, macOS Intel and Apple
+  Silicon, and Windows x86_64. From source, it works wherever Rust and a C
+  compiler do.
 
-**It verifies the server's identity whenever it encrypts.** There is no mode
-that encrypts without checking who is on the other end, which makes Zapadka's
-`require` stricter than libpq's: a server presenting a certificate Zapadka
-cannot verify is refused rather than trusted. Supply a private CA with
-`sslrootcert`. Running unencrypted is supported and normal on a private network,
-but Zapadka says so in the report unless the target asked for it with
-`sslmode=disable`.
-
-**Connect as a role that owns the schema and nothing more.** Zapadka's scripts
-are your SQL, run with your privileges; the runner decides *when* and *in what
-transaction* they run, not what the server will let them do. A role holding
-`SUPERUSER`, `pg_execute_server_program`, or `pg_write_server_files` can reach
-outside the database — `COPY ... TO PROGRAM`, an untrusted-language function
-writing a file — and no transaction, read-only or otherwise, rolls that back.
-Zapadka does not deploy as a superuser, and neither should you.
-
-## Requirements
-
-- PostgreSQL 18 or newer. Zapadka analyses migrations with the PostgreSQL 18
-  grammar, so it cannot make truthful safety decisions about an older server and
-  refuses to try.
-- Linux x86_64 or aarch64, macOS Intel or Apple Silicon, and Windows x86_64 for
-  released binaries. Building from source works anywhere Rust and a C compiler
-  do.
-
-## Nontransactional migrations
-
-`CREATE INDEX CONCURRENTLY` and its relatives refuse to run inside a
-transaction. A migration can declare `transaction = "forbidden"` to run one —
-exactly one statement, so that an interrupted run has a single possible
-question rather than several.
-
-The transactional guarantee is genuinely unavailable here, and Zapadka does not
-pretend otherwise. What it does instead is **write down the attempt before the
-statement runs**, and commit that. So a run killed mid-statement leaves evidence
-naming what was in flight:
-
-```console
-$ zapadka deploy
-error: the connection failed while running migrations/.../deploy.sql, so whether
-       its statement took effect is unknown  [deploy.outcome_unknown]
-```
-
-The target is then **blocked**: every command that would act on it refuses,
-because a plan computed from applied state would be built on a gap. `status`
-still reports, since that is how you find out.
-
-A statement the server *rejected* blocks the target too. An error is not proof
-that nothing happened — a failed `CREATE INDEX CONCURRENTLY` leaves an invalid
-index behind, and an automatic retry would fail on the name that now exists,
-after you had been told the target was clean.
-
-Zapadka will not retry and will not guess. A `CREATE INDEX CONCURRENTLY` can
-finish after the client that asked for it is gone, and it can leave an invalid
-index behind — so both "assume it worked" and "assume it didn't" are wrong some
-of the time, expensively. Look at the database, then say what you found:
-
-```sh
-zapadka resolve <id> --applied      # it took effect; record it
-zapadka resolve <id> --not-applied  # it did not; let a deploy try again
-```
-
-The assertion is written to the append-only history as `asserted_applied` or
-`asserted_not_applied`, with the role that made it. A later reader can always
-tell a migration Zapadka watched succeed from one a person vouched for.
-
-`--not-applied` records a claim; it undoes nothing. If the statement half-ran,
-clean that up yourself first — only you can see what is safe to drop.
-
-## Limitations
-
-Deliberately out of scope for v1: Sqitch or pgTAP CLI/metadata compatibility,
-non-PostgreSQL databases, automatic rollback, declarative schema diffing,
-repeatable migrations, callbacks, and multi-project registries.
-
-## Documentation
-
-- [Architecture decisions](docs/adr/) — the decisions that are costly to reverse
-- [Code quality](docs/development/code-quality.md) — lints, complexity budgets,
-  and the checks CI runs
-- [`ReportV1` JSON Schema](docs/report-v1.schema.json)
+V1 deliberately does not try to be Sqitch or pgTAP compatible at the
+CLI/metadata level, support other databases, do automatic rollback, diff a
+declarative schema, offer repeatable migrations or callbacks, or manage
+multiple projects from one registry.
 
 ## Development
 
@@ -324,18 +278,21 @@ just containers    # show the containers this harness owns
 just clean         # remove them
 ```
 
-`cargo test --workspace` works too and needs nothing installed. The difference
-is cleanup: the harness holds its PostgreSQL container in a `static`, and Rust
-does not drop statics at process exit, so a bare `cargo test` leaves its
-container behind. The harness sweeps leftovers when it *next* starts, which
-bounds the leak to one container; `just test` removes it when the run finishes,
-pass or fail.
+`cargo test --workspace` also works with nothing else installed. The only
+difference is cleanup: a bare Cargo run can leave its PostgreSQL test container
+behind until the next run. `just test` removes it at the end, pass or fail.
 
-Anything that removes a container requires two independent conditions — the
-`dev.zapadka.test-harness` label *and* the `zapadka-testharness-` name prefix.
-Both destructive bugs found in this project came from matching on a single
-identifier that turned out not to be unique, so `docker rm` is never handed a
-filter that could mean somebody else's database.
+The cleanup code is deliberately paranoid. A container must have both the
+`dev.zapadka.test-harness` label and the `zapadka-testharness-` name prefix
+before Zapadka will remove it. That is a little fussy because deleting somebody
+else's database would be much worse.
+
+## Documentation
+
+- [Architecture decisions](docs/adr/) — choices that would be expensive to undo
+- [Code quality](docs/development/code-quality.md) — lints, complexity budgets,
+  and the checks CI runs
+- [`ReportV1` JSON Schema](docs/report-v1.schema.json)
 
 ## Licence
 
