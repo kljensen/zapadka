@@ -27,30 +27,27 @@ pub fn run(
     let paths = select_paths(config, graph, args)?;
     // Format every input before touching the filesystem. A syntax error in a
     // later file therefore cannot leave earlier files rewritten.
-    let formatted: Vec<_> = paths
-        .iter()
-        .map(|path| format_file(path))
-        .collect::<Result<_>>()?;
+    let formatted: Vec<_> = paths.iter().map(format_file).collect::<Result<_>>()?;
     let changed: Vec<_> = formatted
         .iter()
         .filter(|file| file.original != file.formatted)
         .collect();
 
-    if args.write && !args.allow_deploy_rewrite {
-        if let Some(deploy) = changed
+    if args.write
+        && !args.allow_deploy_rewrite
+        && let Some(deploy) = changed
             .iter()
             .find(|file| is_deploy_script(&file.path.absolute))
-        {
-            return Err(Error::new(
-                ErrorCode::FormatDeployRewriteDenied,
-                format!(
-                    "refusing to rewrite immutable migration script {}",
-                    deploy.path.relative
-                ),
-            )
-            .at(Location::file(&deploy.path.relative))
-            .with_hint("pass --allow-deploy-rewrite only before that migration is deployed"));
-        }
+    {
+        return Err(Error::new(
+            ErrorCode::FormatDeployRewriteDenied,
+            format!(
+                "refusing to rewrite immutable migration script {}",
+                deploy.path.relative
+            ),
+        )
+        .at(Location::file(&deploy.path.relative))
+        .with_hint("pass --allow-deploy-rewrite only before that migration is deployed"));
     }
 
     if args.check {
@@ -190,7 +187,7 @@ fn selected(config: &LoadedConfig, absolute: Utf8PathBuf) -> Result<SelectedPath
     }
     let relative = absolute
         .strip_prefix(&config.root)
-        .map_or_else(|_| absolute.to_string(), |path| path.to_string());
+        .map_or_else(|_| absolute.to_string(), ToString::to_string);
     Ok(SelectedPath { absolute, relative })
 }
 

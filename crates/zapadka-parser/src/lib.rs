@@ -233,13 +233,13 @@ mod tests {
         // The CREATE FUNCTION shape is adapted from pgFormatter's upstream
         // PostgreSQL regression corpus (create_function_3.sql). Dollar quoted
         // bodies must remain literals to the outer SQL formatter.
-        let source = r#"
+        let source = r"
 CREATE TABLE public.orders(id bigint primary key, state text not null);
 CREATE FUNCTION public.order_count() RETURNS integer LANGUAGE sql AS $$
   SELECT count(*)::integer FROM public.orders;
 $$;
 ALTER TABLE public.orders ADD COLUMN created_at timestamptz DEFAULT now();
-"#;
+";
         let once = format(source, FormatOptions::default()).unwrap();
         let twice = format(&once, FormatOptions::default()).unwrap();
         assert_eq!(once, twice);

@@ -234,6 +234,10 @@ pub struct Script {
 }
 
 /// One asynchronous PostgreSQL server event observed while a script ran.
+// `ServerNotice` is intentionally stored inline: reports normally have few
+// messages, and preserving a simple, allocation-free enum outweighs shrinking
+// this cold serialized type. Boxing would make every notice more expensive.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ServerMessage {

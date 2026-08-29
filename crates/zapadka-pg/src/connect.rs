@@ -481,7 +481,7 @@ where
                     source_file: notice.file().map(str::to_owned),
                     source_line: notice.line(),
                     source_routine: notice.routine().map(str::to_owned),
-                }))
+                }));
             }
             Ok(AsyncMessage::Notification(notification)) => {
                 messages.push(ServerMessage::Notification(ServerNotification {
