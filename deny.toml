@@ -21,9 +21,11 @@ yanked = "deny"
 ignore = []
 
 [licenses]
-# Permissive licences only. Zapadka is MIT; a copyleft dependency statically
-# linked into the binary would change what downstream users may do with it.
+# Permissive licences only. Zapadka is released under the Unlicense; a copyleft
+# dependency statically linked into the binary would change what downstream
+# users may do with it.
 allow = [
+    "Unlicense",
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
