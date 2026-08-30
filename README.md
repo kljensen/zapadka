@@ -1,5 +1,9 @@
 # Zapadka
 
+[![CI](https://img.shields.io/github/actions/workflow/status/kljensen/zapadka/ci.yml?branch=main&style=for-the-badge&logo=github-actions&logoColor=white&label=CI)](https://github.com/kljensen/zapadka/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/kljensen/zapadka?display_name=tag&style=for-the-badge&label=release)](https://github.com/kljensen/zapadka/releases)
+[![License: Unlicense](https://img.shields.io/badge/License-Unlicense-yellow.svg?style=for-the-badge)](UNLICENSE)
+
 Zapadka is a [PostgreSQL](https://www.postgresql.org/) migration, testing, and formatting tool packaged
 as single static binary. It's basically a convenient Frankenstein's monster mashup of
 [Sqitch](https://github.com/sqitchers/sqitch),
@@ -27,14 +31,15 @@ The whole command set is `init`, `new`, `lint`, `format`, `status`, `deploy`,
 ## The basic idea
 
 Zapadka keeps authored SQL migrations. There is no schema-diff magic and no DSL
-to learn: the SQL you review is the SQL that runs. It keeps a registry in the
-database, so it can tell what happened there instead of guessing from the files
-in your checkout.
+to learn: the SQL you review is the SQL that runs. This is very much the
+[Sqitch](https://sqitch.org/) school of database change management: keep the
+changes as SQL, track their dependencies, and record what happened in the
+database instead of guessing from the files in your checkout.
 
-Migrations are a graph rather than a numbered list. Each one has a permanent
-UUIDv7 identity and says what needs to come before it. That means two branches
-can add migrations independently and later meet without a renumbering ritual.
-When it deploys, Zapadka topologically sorts the graph deterministically.
+Like Sqitch, migrations are a graph rather than a numbered list. Each one has a
+permanent UUIDv7 identity and says what needs to come before it. That means two
+branches can add migrations independently and later meet without a renumbering
+ritual. When it deploys, Zapadka topologically sorts the graph deterministically.
 
 I also wanted transaction boundaries to be boring. Zapadka owns them: a normal
 migration cannot contain `BEGIN`, `COMMIT`, `ROLLBACK`, or `SAVEPOINT`. The
@@ -53,11 +58,13 @@ migration for a correction; then the history says what actually happened.
 ## Formatting, verification, and tests
 
 `zapadka format --check` checks migration scripts and `tests/db/**/*.sql` (or
-just the paths you give it) with that same PostgreSQL-aware parser. `--write`
-rewrites selected files atomically. It refuses to rewrite a `deploy.sql` unless
-you explicitly add `--allow-deploy-rewrite`, because formatting a deployed
-migration changes its definition. Comments survive formatting; code inside a
-dollar-quoted function body is left alone.
+just the paths you give it) with a PostgreSQL-aware parser. Its format command
+is in the tradition of [pgFormatter](https://github.com/darold/pgFormatter),
+including regression fixtures from that project's corpus. `--write` rewrites
+selected files atomically. It refuses to rewrite a `deploy.sql` unless you
+explicitly add `--allow-deploy-rewrite`, because formatting a deployed migration
+changes its definition. Comments survive formatting; code inside a dollar-quoted
+function body is left alone.
 
 Each migration can have a `verify.sql`. Zapadka runs it after the migration has
 committed, on a fresh read-only transaction that it always rolls back. This is
@@ -82,11 +89,12 @@ see one another's data. The exception is sequences: Zapadka will tell you when
 one advanced, but will not rewind it and risk handing an application connection
 an id it has already seen.
 
-Tests use a bundled SQL assertion library. It is inspired by pgTAP, but it is
-not pgTAP and it does not emit TAP. There is no extension to install and nothing
-to put on the server filesystem. Assertions record typed result rows that
-Zapadka reads directly, which gives useful differences instead of two strings
-to squint at.
+Tests use a bundled SQL assertion library. Its public names and argument types
+start with [pgTAP](https://pgtap.org/), whose API is good and already familiar to
+many Postgres users. Zapadka is not pgTAP and does not emit TAP, though: there is
+no extension to install and nothing to put on the server filesystem. Assertions
+record typed result rows that Zapadka reads directly, which gives useful
+differences instead of two strings to squint at.
 
 ```sql
 SELECT has_table_in('app', 'orders');
@@ -296,6 +304,12 @@ else's database would be much worse.
 
 ## Licence
 
-MIT. Zapadka embeds a pinned build of
-[libpg_query](https://github.com/pganalyze/libpg_query) (BSD-3-Clause, with
-PostgreSQL-licensed sources); see `third_party/libpg_query/`.
+Zapadka's own code is released into the public domain under the
+[Unlicense](UNLICENSE).
+
+The vendored code is not covered by that dedication. Zapadka embeds a pinned
+build of [libpg_query](https://github.com/pganalyze/libpg_query) (BSD-3-Clause,
+with PostgreSQL-licensed sources); see `third_party/libpg_query/`. It also
+retains [pgTAP](https://pgtap.org/) source under the PostgreSQL License as
+attribution and an implementation reference for its deliberately divergent
+assertion library; see `third_party/pgtap/`.

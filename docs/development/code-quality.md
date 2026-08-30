@@ -119,7 +119,7 @@ the deploy loop.
 `deny.toml` states what is allowed into the binary. Two rules are worth calling
 out:
 
-- **Permissive licences only.** Zapadka is MIT and statically links everything
+- **Permissive licences only.** Zapadka is released under the Unlicense and statically links everything
   it depends on, so a copyleft dependency would change what downstream users may
   do with the binary. The allow-list is kept to licences actually present, so
   adding a dependency with a new licence is a decision someone makes rather than
