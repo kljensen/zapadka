@@ -126,6 +126,65 @@ impl Runner {
         &self.facts
     }
 
+    /// Transitions applied legacy definitions atomically, including any schema
+    /// upgrade. The caller holds the deployment lock and supplies freshly read
+    /// registry state. No migration SQL is executed.
+    pub async fn rehash(
+        &mut self,
+        graph: &zapadka_core::graph::Graph,
+        state: &registry::RegistryState,
+        accept_current: bool,
+        reason: Option<&str>,
+    ) -> Result<crate::rehash::RehashPlan> {
+        if accept_current && reason.is_none_or(|reason| reason.trim().is_empty()) {
+            return Err(Error::new(
+                zapadka_core::error::ErrorCode::HistoryDefinitionChanged,
+                "--accept-current requires a nonblank --reason",
+            ));
+        }
+        let plan = crate::rehash::plan(graph, state, accept_current)?;
+        plan.validate()?;
+        if plan.is_empty() {
+            return Ok(plan);
+        }
+        let project_id = state.project_id.ok_or_else(|| {
+            Error::new(
+                zapadka_core::error::ErrorCode::RegistryNotInitialized,
+                "rehash requires an initialized registry",
+            )
+        })?;
+        let transaction = self
+            .client
+            .transaction()
+            .await
+            .map_err(|error| registry_failed(error, "begin the rehash transaction"))?;
+        registry::upgrade_in_transaction(
+            &transaction,
+            &self.schema,
+            project_id,
+            &self.zapadka_version,
+            state,
+        )
+        .await?;
+        crate::rehash::apply(
+            &transaction,
+            &plan,
+            &crate::rehash::AuditContext {
+                schema: &self.schema,
+                run_id: self.run_id,
+                facts: &self.facts,
+                zapadka_version: &self.zapadka_version,
+                reason,
+            },
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| registry_failed(error, "commit the rehash transaction"))?;
+        Ok(plan)
+    }
+
     /// Drains messages delivered since the last script boundary.
     pub fn take_server_messages(&mut self) -> Vec<zapadka_core::report::ServerMessage> {
         self.server_messages.since(&mut self.message_cursor)
@@ -152,10 +211,11 @@ impl Runner {
     /// between runs, and `baseline` and `resolve` write applied rows from an
     /// operator's word — recorded as assertions rather than observations.
     pub async fn deploy(&mut self, migration: &Migration) -> Result<ScriptOutcome> {
+        let definition = migration.structural_definition_sha256()?;
         let started = Instant::now();
         let path = migration.deploy.relative_path.clone();
 
-        let result = self.deploy_inner(migration, started).await;
+        let result = self.deploy_inner(migration, &definition, started).await;
         // A script running for longer than 584 million years is not a case worth
         // modelling; saturating keeps the report honest without a panic.
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -185,7 +245,8 @@ impl Runner {
                         action: "deploy",
                         outcome: "failed",
                         transaction_mode: Some(migration.manifest.transaction.as_str()),
-                        definition_sha256: Some(&migration.definition_sha256),
+                        definition_sha256: Some(&definition),
+                        definition_algorithm: Some(registry::STRUCTURAL_V1),
                         script_role: Some("deploy"),
                         script_sha256: Some(&migration.deploy.sha256),
                         duration_ms: Some(duration_ms),
@@ -203,7 +264,12 @@ impl Runner {
     /// commit together. Recording the event afterwards would open a window
     /// where the database says a migration is applied and the history says the
     /// deploy failed.
-    async fn deploy_inner(&mut self, migration: &Migration, started: Instant) -> Result<()> {
+    async fn deploy_inner(
+        &mut self,
+        migration: &Migration,
+        definition: &str,
+        started: Instant,
+    ) -> Result<()> {
         let transaction = self
             .client
             .transaction()
@@ -230,7 +296,14 @@ impl Runner {
                 script_failed(error, ScriptRole::Deploy, &migration.deploy.relative_path)
             })?;
 
-        registry::record_applied(&transaction, &self.schema, self.run_id, migration).await?;
+        registry::record_applied(
+            &transaction,
+            &self.schema,
+            self.run_id,
+            migration,
+            definition,
+        )
+        .await?;
 
         self.sequence += 1;
         record_event(
@@ -245,7 +318,8 @@ impl Runner {
                 action: "deploy",
                 outcome: "succeeded",
                 transaction_mode: Some(migration.manifest.transaction.as_str()),
-                definition_sha256: Some(&migration.definition_sha256),
+                definition_sha256: Some(definition),
+                definition_algorithm: Some(registry::STRUCTURAL_V1),
                 script_role: Some("deploy"),
                 script_sha256: Some(&migration.deploy.sha256),
                 // Measured before the commit, which is the only point at which
@@ -287,6 +361,7 @@ impl Runner {
         &mut self,
         migration: &Migration,
     ) -> Result<ScriptOutcome> {
+        let definition = migration.structural_definition_sha256()?;
         let started = Instant::now();
         let path = migration.deploy.relative_path.clone();
 
@@ -303,7 +378,7 @@ impl Runner {
 
         // Step 1, committed on its own. If this fails, nothing has run, and the
         // failure is an ordinary one.
-        self.record_attempt(migration).await?;
+        self.record_attempt(migration, &definition).await?;
 
         // Step 2, outside any transaction. `batch_execute` on the client itself
         // runs in autocommit, which is what the statement requires.
@@ -312,7 +387,8 @@ impl Runner {
 
         match outcome {
             Ok(()) => {
-                self.finish_attempt(migration, duration_ms).await?;
+                self.finish_attempt(migration, &definition, duration_ms)
+                    .await?;
                 Ok(ScriptOutcome {
                     role: ScriptRole::Deploy,
                     path,
@@ -334,14 +410,17 @@ impl Runner {
             // decision about destroying an object, which is theirs.
             Err(error) if error.as_db_error().is_some() => {
                 let failure = script_failed(error, ScriptRole::Deploy, &path);
-                self.record_failure(migration, duration_ms, &failure).await;
+                self.record_failure(migration, &definition, duration_ms, &failure)
+                    .await;
                 Err(blocked_by(failure, migration))
             }
             // The server did not answer: a dropped connection, a killed backend,
             // a timeout on the client side. The statement may have completed
             // anyway -- `CREATE INDEX CONCURRENTLY` can and does finish after
             // the client that asked for it has gone. The attempt row stays.
-            Err(error) => Err(self.outcome_unknown(migration, duration_ms, &error).await),
+            Err(error) => Err(self
+                .outcome_unknown(migration, &definition, duration_ms, &error)
+                .await),
         }
     }
 
@@ -394,6 +473,7 @@ impl Runner {
                 },
                 transaction_mode: Some("forbidden"),
                 definition_sha256: Some(&attempt.definition_sha256),
+                definition_algorithm: Some(&attempt.definition_algorithm),
                 script_role: Some("deploy"),
                 script_sha256: Some(&attempt.deploy_sha256),
                 duration_ms: None,
@@ -436,7 +516,7 @@ impl Runner {
     }
 
     /// Commits the record that a nontransactional statement is about to run.
-    async fn record_attempt(&mut self, migration: &Migration) -> Result<()> {
+    async fn record_attempt(&mut self, migration: &Migration, definition: &str) -> Result<()> {
         let transaction = self
             .client
             .transaction()
@@ -448,6 +528,7 @@ impl Runner {
             &self.schema,
             self.run_id,
             migration,
+            definition,
             &self.facts,
             &self.zapadka_version,
         )
@@ -468,7 +549,8 @@ impl Runner {
                 // this event can say at the time it is written.
                 outcome: "attempted",
                 transaction_mode: Some("forbidden"),
-                definition_sha256: Some(&migration.definition_sha256),
+                definition_sha256: Some(definition),
+                definition_algorithm: Some(registry::STRUCTURAL_V1),
                 script_role: Some("deploy"),
                 script_sha256: Some(&migration.deploy.sha256),
                 duration_ms: None,
@@ -484,14 +566,26 @@ impl Runner {
     }
 
     /// Records a nontransactional statement that succeeded.
-    async fn finish_attempt(&mut self, migration: &Migration, duration_ms: u64) -> Result<()> {
+    async fn finish_attempt(
+        &mut self,
+        migration: &Migration,
+        definition: &str,
+        duration_ms: u64,
+    ) -> Result<()> {
         let transaction = self
             .client
             .transaction()
             .await
             .map_err(|error| registry_failed(error, "begin the applied-state record"))?;
 
-        registry::record_applied(&transaction, &self.schema, self.run_id, migration).await?;
+        registry::record_applied(
+            &transaction,
+            &self.schema,
+            self.run_id,
+            migration,
+            definition,
+        )
+        .await?;
         registry::clear_attempt(&transaction, &self.schema, migration.id).await?;
 
         self.sequence += 1;
@@ -507,7 +601,8 @@ impl Runner {
                 action: "deploy",
                 outcome: "succeeded",
                 transaction_mode: Some("forbidden"),
-                definition_sha256: Some(&migration.definition_sha256),
+                definition_sha256: Some(definition),
+                definition_algorithm: Some(registry::STRUCTURAL_V1),
                 script_role: Some("deploy"),
                 script_sha256: Some(&migration.deploy.sha256),
                 duration_ms: Some(duration_ms),
@@ -527,14 +622,21 @@ impl Runner {
     /// The attempt row is deliberately left in place. Best-effort by design:
     /// the deploy failure is what the operator needs to see, and a second
     /// failure while writing the event must not replace it.
-    async fn record_failure(&mut self, migration: &Migration, duration_ms: u64, failure: &Error) {
+    async fn record_failure(
+        &mut self,
+        migration: &Migration,
+        definition: &str,
+        duration_ms: u64,
+        failure: &Error,
+    ) {
         let _ = self
             .record(Event {
                 migration_id: Some(migration.id),
                 action: "deploy",
                 outcome: "failed",
                 transaction_mode: Some("forbidden"),
-                definition_sha256: Some(&migration.definition_sha256),
+                definition_sha256: Some(definition),
+                definition_algorithm: Some(registry::STRUCTURAL_V1),
                 script_role: Some("deploy"),
                 script_sha256: Some(&migration.deploy.sha256),
                 duration_ms: Some(duration_ms),
@@ -552,6 +654,7 @@ impl Runner {
     async fn outcome_unknown(
         &mut self,
         migration: &Migration,
+        definition: &str,
         duration_ms: u64,
         cause: &tokio_postgres::Error,
     ) -> Error {
@@ -580,7 +683,8 @@ impl Runner {
                 action: "deploy",
                 outcome: "unknown",
                 transaction_mode: Some("forbidden"),
-                definition_sha256: Some(&migration.definition_sha256),
+                definition_sha256: Some(definition),
+                definition_algorithm: Some(registry::STRUCTURAL_V1),
                 script_role: Some("deploy"),
                 script_sha256: Some(&migration.deploy.sha256),
                 duration_ms: Some(duration_ms),
@@ -599,6 +703,7 @@ impl Runner {
         let Some(script) = &migration.verify else {
             return Ok(None);
         };
+        let (definition, algorithm) = self.recorded_identity(migration).await?;
 
         let started = Instant::now();
         let result = self.verify_inner(&script.sql, &script.relative_path).await;
@@ -618,7 +723,8 @@ impl Runner {
                 action: "verify",
                 outcome,
                 transaction_mode: Some("required"),
-                definition_sha256: Some(&migration.definition_sha256),
+                definition_sha256: Some(&definition),
+                definition_algorithm: Some(&algorithm),
                 script_role: Some("verify"),
                 // The exact bytes verified, recorded because `verify.sql` is
                 // mutable: a past run's result only means something alongside the
@@ -724,10 +830,17 @@ impl Runner {
                 format!("{} has no revert.sql", migration.relative_dir),
             )
         })?;
+        let identity = self.recorded_identity(migration).await?;
 
         let started = Instant::now();
         let result = self
-            .revert_inner(migration, &script.sql, &script.relative_path, started)
+            .revert_inner(
+                migration,
+                &identity,
+                &script.sql,
+                &script.relative_path,
+                started,
+            )
             .await;
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
@@ -742,7 +855,8 @@ impl Runner {
                     action: "revert",
                     outcome: "failed",
                     transaction_mode: Some("required"),
-                    definition_sha256: Some(&migration.definition_sha256),
+                    definition_sha256: Some(&identity.0),
+                    definition_algorithm: Some(&identity.1),
                     script_role: Some("revert"),
                     // The exact bytes reverted. `revert.sql` is mutable, so a
                     // past revert only means something alongside the script
@@ -768,6 +882,7 @@ impl Runner {
     async fn revert_inner(
         &mut self,
         migration: &Migration,
+        identity: &(String, String),
         sql: &str,
         path: &str,
         started: Instant,
@@ -792,8 +907,6 @@ impl Runner {
             .await
             .map_err(|error| script_failed(error, ScriptRole::Revert, path))?;
 
-        registry::remove_applied(&transaction, &self.schema, migration.id).await?;
-
         self.sequence += 1;
         record_event(
             &transaction,
@@ -807,7 +920,8 @@ impl Runner {
                 action: "revert",
                 outcome: "succeeded",
                 transaction_mode: Some("required"),
-                definition_sha256: Some(&migration.definition_sha256),
+                definition_sha256: Some(&identity.0),
+                definition_algorithm: Some(&identity.1),
                 script_role: Some("revert"),
                 // The exact bytes reverted. `revert.sql` is mutable, so a past
                 // revert only means something alongside the script that ran.
@@ -824,6 +938,8 @@ impl Runner {
         )
         .await?;
 
+        registry::remove_applied(&transaction, &self.schema, migration.id).await?;
+
         transaction
             .commit()
             .await
@@ -836,6 +952,10 @@ impl Runner {
     /// All of them commit together: a partially baselined closure would be a
     /// history nobody asserted and nobody can explain.
     pub async fn baseline(&mut self, migrations: &[&Migration]) -> Result<()> {
+        let definitions: Vec<_> = migrations
+            .iter()
+            .map(|migration| migration.structural_definition_sha256())
+            .collect::<Result<_>>()?;
         let transaction = self
             .client
             .transaction()
@@ -846,8 +966,15 @@ impl Runner {
         // events afterwards would let a registry write failure leave migrations
         // marked as baselined with no evidence in the append-only history --
         // and the command would still report success.
-        for migration in migrations {
-            registry::record_applied(&transaction, &self.schema, self.run_id, migration).await?;
+        for (migration, definition) in migrations.iter().zip(&definitions) {
+            registry::record_applied(
+                &transaction,
+                &self.schema,
+                self.run_id,
+                migration,
+                definition,
+            )
+            .await?;
 
             self.sequence += 1;
             record_event(
@@ -862,7 +989,8 @@ impl Runner {
                     action: "baseline",
                     outcome: "succeeded",
                     transaction_mode: Some(migration.manifest.transaction.as_str()),
-                    definition_sha256: Some(&migration.definition_sha256),
+                    definition_sha256: Some(definition),
+                    definition_algorithm: Some(registry::STRUCTURAL_V1),
                     script_role: None,
                     script_sha256: None,
                     duration_ms: None,
@@ -879,6 +1007,26 @@ impl Runner {
         Ok(())
     }
 
+    /// Capture the applied comparison identity before mutable verify/revert SQL
+    /// runs or removes its row. Direct runner verification can also be used
+    /// without an applied row, in which case canonicalization still precedes SQL.
+    async fn recorded_identity(&self, migration: &Migration) -> Result<(String, String)> {
+        let schema = quote_identifier(&self.schema);
+        let row = self.client.query_opt(
+            &format!("SELECT definition_sha256, definition_algorithm FROM {schema}.applied_migrations WHERE migration_id = $1"),
+            &[&migration.id],
+        ).await.map_err(|error| registry_failed(error, "read the applied definition before execution"))?;
+        if let Some(row) = row {
+            let algorithm: String = row.get(1);
+            registry::check_definition_algorithm(&algorithm)?;
+            return Ok((row.get(0), algorithm));
+        }
+        Ok((
+            migration.structural_definition_sha256()?,
+            registry::STRUCTURAL_V1.to_owned(),
+        ))
+    }
+
     /// Records an event for something that happened outside a migration, such
     /// as creating the registry.
     pub async fn record_run_event(&mut self, action: &str, outcome: &str) -> Result<()> {
@@ -888,6 +1036,7 @@ impl Runner {
             outcome,
             transaction_mode: None,
             definition_sha256: None,
+            definition_algorithm: None,
             script_role: None,
             script_sha256: None,
             duration_ms: None,
@@ -969,7 +1118,7 @@ struct BoundEvent<'a> {
 }
 
 impl BoundEvent<'_> {
-    fn params(&self) -> [&(dyn ToSql + Sync); 17] {
+    fn params(&self) -> [&(dyn ToSql + Sync); 18] {
         [
             &self.run_id,
             &self.sequence,
@@ -988,6 +1137,7 @@ impl BoundEvent<'_> {
             &self.facts.current_user,
             &self.facts.server_version,
             &self.zapadka_version,
+            &self.event.definition_algorithm,
         ]
     }
 }
@@ -1018,8 +1168,8 @@ fn event_insert(schema: &str, event: &Event<'_>) -> (String, EventValues) {
             (run_id, sequence, migration_id, action, outcome, transaction_mode, \
              definition_sha256, script_role, script_sha256, duration_ms, sqlstate, \
              message, detail, session_user_name, current_user_name, server_version, \
-             zapadka_version) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)"
+             zapadka_version, definition_algorithm) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)"
     );
     (sql, values)
 }
@@ -1052,7 +1202,8 @@ struct Event<'a> {
     action: &'a str,
     outcome: &'a str,
     transaction_mode: Option<&'a str>,
-    definition_sha256: Option<&'a String>,
+    definition_sha256: Option<&'a str>,
+    definition_algorithm: Option<&'a str>,
     script_role: Option<&'a str>,
     script_sha256: Option<&'a String>,
     duration_ms: Option<u64>,

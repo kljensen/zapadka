@@ -10,6 +10,7 @@ pub mod format;
 pub mod init;
 pub mod lint;
 pub mod new;
+pub mod rehash;
 pub mod resolve;
 pub mod revert;
 pub mod status;

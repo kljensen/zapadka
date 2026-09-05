@@ -17,7 +17,10 @@ without discarding the evidence needed to explain prior operations.
 Zapadka will hold a session-scoped PostgreSQL advisory lock from preflight
 through default verification. One project per target database will use a
 reserved registry schema containing versioned metadata, current applied
-migrations, and append-only events. Mutating commands perform embedded,
+migrations, unresolved nontransactional attempts, and append-only execution
+and rehash events. Rehash changes the comparison identity while retaining the
+original execution evidence and transition provenance (ADR-0006).
+Mutating commands perform embedded,
 ordered registry upgrades while holding the lock; older binaries refuse newer
 registry formats.
 

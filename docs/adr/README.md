@@ -20,3 +20,4 @@ history keeps the earlier text for anyone who wants it.
 | [0003: Serialize deployments and retain registry history](0003-serialize-deployments-and-retain-registry-history.md) | Accepted |
 | [0004: Separate verification from tests, and own the assertion library](0004-separate-deployment-verification-from-database-tests.md) | Accepted |
 | [0005: Ship self-contained PostgreSQL 18 Linux binaries](0005-ship-self-contained-postgresql-18-linux-binaries.md) | Accepted |
+| [0006: Version structural migration hashes](0006-version-structural-migration-hashes.md) | Accepted |

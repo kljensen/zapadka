@@ -1,18 +1,11 @@
 //! Comparing deployed history with the checked-out project.
 //!
-//! A migration that has been applied is a statement about what was run against
-//! a database. If the source of that migration later changes, the statement is
-//! no longer true, and nothing Zapadka reports about that database can be
-//! trusted — `status` would describe a project that no longer exists.
-//!
-//! So Zapadka refuses. It does not re-run the changed migration, because the
-//! old one already ran. It does not update the recorded hash, because that
-//! would erase the evidence. Corrective work is a new migration, which leaves
-//! both facts in the history: what was originally deployed, and what fixed it.
-//!
-//! This is deliberately stricter than "the schema looks right". Zapadka checks
-//! that the *source* matches, not that the *result* does, because it cannot
-//! know what else depended on the original text.
+//! Every applied row names the definition policy it was recorded under.
+//! Legacy definitions bind exact source bytes; structural definitions ignore
+//! source comments and formatting but preserve SQL structure and literals.
+//! Substantive changes are history errors, independent of whether the database
+//! currently looks equivalent. Corrective work belongs in a new migration.
+//! Explicit, audited rehash transitions live separately from this validation.
 
 use std::collections::BTreeMap;
 
@@ -40,8 +33,8 @@ impl Plan {
     }
 }
 
-/// Checks that every applied migration still matches its source, then computes
-/// what remains to be applied.
+/// Checks every applied migration under its recorded definition algorithm,
+/// then computes what remains to be applied.
 ///
 /// The integrity check runs first and covers every applied migration, not only
 /// the ones a deploy would touch. A tampered migration deep in the history is
@@ -80,7 +73,7 @@ pub fn plan(graph: &Graph, applied: &BTreeMap<Uuid, AppliedMigration>) -> Result
 /// `DELETE`. Left alone, the missing prerequisite is simply classified as
 /// pending, and the next deploy runs it *after* the migration that depends on
 /// it, which is the one thing the graph exists to prevent.
-fn check_dependencies_applied(
+pub(crate) fn check_dependencies_applied(
     migration: &Migration,
     applied: &BTreeMap<Uuid, AppliedMigration>,
 ) -> Result<()> {
@@ -114,7 +107,7 @@ fn check_dependencies_applied(
 }
 
 /// The error for a migration the database has but the project does not.
-fn missing(record: &AppliedMigration) -> Error {
+pub(crate) fn missing(record: &AppliedMigration) -> Error {
     Error::new(
         ErrorCode::HistoryMigrationMissing,
         format!(
@@ -132,8 +125,15 @@ fn missing(record: &AppliedMigration) -> Error {
 }
 
 /// Fails when a deployed migration's immutable definition has changed.
-fn check_unchanged(migration: &Migration, record: &AppliedMigration) -> Result<()> {
-    if migration.definition_sha256 == record.definition_sha256 {
+pub(crate) fn check_unchanged(migration: &Migration, record: &AppliedMigration) -> Result<()> {
+    crate::registry::check_definition_algorithm(&record.definition_algorithm)?;
+    let definition = match record.definition_algorithm.as_str() {
+        crate::registry::STRUCTURAL_V1 => migration.structural_definition_sha256()?,
+        _ => migration
+            .manifest
+            .definition_sha256(migration.deploy.sql.as_bytes()),
+    };
+    if definition == record.definition_sha256 {
         return Ok(());
     }
 
@@ -193,7 +193,8 @@ fn check_unchanged(migration: &Migration, record: &AppliedMigration) -> Result<(
     )
     .with_context("migration_id", migration.id)
     .with_context("deployed_definition_sha256", &record.definition_sha256)
-    .with_context("current_definition_sha256", &migration.definition_sha256)
+    .with_context("current_definition_sha256", &definition)
+    .with_context("definition_algorithm", &record.definition_algorithm)
     .with_context("applied_at", &record.applied_at);
 
     if changed_script {
@@ -227,7 +228,7 @@ fn describe(ids: &[Uuid]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     // Assertions and unreachable branches in tests panic by design.
     #![allow(clippy::panic)]
 
@@ -241,7 +242,7 @@ mod tests {
         Uuid::parse_str(&format!("0198f5c0-0000-7000-8000-0000000000{n:02x}")).unwrap()
     }
 
-    fn migration(n: u8, depends: &[u8], deploy: &str) -> Migration {
+    pub(crate) fn migration(n: u8, depends: &[u8], deploy: &str) -> Migration {
         let own_id = id(n);
         let list = depends
             .iter()
@@ -279,10 +280,11 @@ mod tests {
     }
 
     /// The registry row a successful deploy of `migration` would have written.
-    fn record_of(migration: &Migration) -> AppliedMigration {
+    pub(crate) fn record_of(migration: &Migration) -> AppliedMigration {
         let mut depends = migration.depends().to_vec();
         depends.sort();
         AppliedMigration {
+            definition_algorithm: crate::registry::RAW_V1.to_owned(),
             id: migration.id,
             slug: migration.slug.clone(),
             definition_sha256: migration.definition_sha256.clone(),
@@ -349,6 +351,47 @@ mod tests {
             Some(&deployed.deploy.sha256)
         );
         assert!(error.hint().unwrap().contains("new migration"));
+    }
+
+    #[test]
+    fn mixed_algorithms_ignore_cosmetics_only_for_structural_rows() {
+        let legacy = migration(1, &[], "CREATE TABLE a();");
+        let original = migration(2, &[1], "CREATE TABLE b(n integer DEFAULT 1);");
+        let mut structural = record_of(&original);
+        structural.definition_algorithm = crate::registry::STRUCTURAL_V1.to_owned();
+        structural.definition_sha256 = original.structural_definition_sha256().unwrap();
+        let formatted = migration(
+            2,
+            &[1],
+            "-- explanation\nCREATE TABLE b ( n integer DEFAULT 1 );",
+        );
+        let state = applied(vec![record_of(&legacy), structural]);
+        let graph = Graph::build(vec![legacy.clone(), formatted]).unwrap();
+        assert!(plan(&graph, &state).is_ok());
+        let substantive = migration(2, &[1], "CREATE TABLE b(n integer DEFAULT 2);");
+        let graph = Graph::build(vec![legacy.clone(), substantive]).unwrap();
+        assert_eq!(
+            plan(&graph, &state).unwrap_err().code,
+            ErrorCode::HistoryDefinitionChanged
+        );
+        let legacy_edited = migration(1, &[], "CREATE TABLE a(); -- explanation");
+        let graph = Graph::build(vec![legacy_edited, original]).unwrap();
+        assert_eq!(
+            plan(&graph, &state).unwrap_err().code,
+            ErrorCode::HistoryDefinitionChanged
+        );
+    }
+
+    #[test]
+    fn unknown_comparison_policy_fails_even_if_the_hash_matches() {
+        let source = migration(1, &[], "SELECT 1;");
+        let mut record = record_of(&source);
+        record.definition_algorithm = "future-v9".to_owned();
+        let graph = Graph::build(vec![source]).unwrap();
+        assert_eq!(
+            plan(&graph, &applied(vec![record])).unwrap_err().code,
+            ErrorCode::RegistryFormatTooNew
+        );
     }
 
     #[test]

@@ -21,7 +21,7 @@ use zapadka_pg::execute::Runner;
 use zapadka_pg::{RegistryState, history, lock};
 
 use crate::cli::RevertArgs;
-use crate::commands::{deploy::result_of, deploy::script_of, target};
+use crate::commands::{deploy::script_of, target};
 use crate::session::Session;
 
 /// Runs `zapadka revert`.
@@ -79,14 +79,14 @@ async fn revert_under_lock(
     graph: &Graph,
     args: &RevertArgs,
     session: &mut Session,
-    client: zapadka_pg::Client,
+    mut client: zapadka_pg::Client,
     schema: &str,
     name: &str,
     facts: zapadka_pg::ServerFacts,
     timeouts: zapadka_pg::Timeouts,
     server_messages: zapadka_pg::ServerMessages,
 ) -> (zapadka_pg::Client, Result<()>) {
-    let state = match target::refresh_state(&client, config, schema).await {
+    let state = match target::refresh_state(&mut client, config, schema).await {
         Ok(state) => state,
         Err(error) => return (client, Err(error)),
     };
@@ -111,6 +111,17 @@ async fn revert_under_lock(
         Err(error) => return (client, Err(error)),
     };
 
+    if let Err(error) = target::claim_and_upgrade(
+        &mut client,
+        config,
+        schema,
+        &state,
+        config.config.policy.advisory_lock_timeout,
+    )
+    .await
+    {
+        return (client, Err(error));
+    }
     let mut runner = Runner::new(
         client,
         schema.to_owned(),
@@ -120,26 +131,38 @@ async fn revert_under_lock(
         timeouts,
         server_messages,
     );
-    let outcome = revert_one(migration, session, &mut runner).await;
+    let outcome = revert_one(migration, &state, session, &mut runner).await;
     (runner.into_client(), outcome)
 }
 
 /// Reverts one migration and records the result.
 async fn revert_one(
     migration: &Migration,
+    state: &RegistryState,
     session: &mut Session,
     runner: &mut Runner,
 ) -> Result<()> {
+    let row = state.applied.get(&migration.id).ok_or_else(|| {
+        Error::new(
+            ErrorCode::SelectorMatchedNothing,
+            "selected migration is not applied",
+        )
+    })?;
+    let mut result = crate::commands::deploy::recorded_result_of(
+        migration,
+        Action::Revert,
+        Status::Succeeded,
+        row,
+    );
     match runner.revert(migration).await {
         Ok(reverted) => {
-            let mut result = result_of(migration, Action::Revert, Status::Succeeded);
             result.duration_ms = Some(reverted.duration_ms);
             result.scripts.push(script_of(&reverted, Status::Succeeded));
             session.migrations.push(result);
             Ok(())
         }
         Err(error) => {
-            let mut result = result_of(migration, Action::Revert, Status::Failed);
+            result.status = Status::Failed;
             // Named with its hash, because `revert.sql` is mutable and a failed
             // revert is exactly when someone needs to know which bytes ran.
             if let Some(script) = &migration.revert {
@@ -274,6 +297,8 @@ mod tests {
                     id: migration.id,
                     slug: migration.slug.clone(),
                     definition_sha256: migration.definition_sha256.clone(),
+                    definition_algorithm: zapadka_core::manifest::LEGACY_DEFINITION_ALGORITHM
+                        .to_owned(),
                     deploy_sha256: migration.deploy.sha256.clone(),
                     depends: migration.depends().to_vec(),
                     transaction_mode: "required".to_owned(),

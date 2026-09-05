@@ -58,6 +58,38 @@ pub fn render(report: &ReportV1, out: &mut impl Write) -> std::io::Result<()> {
 /// The closing line: what happened, and how long it took.
 fn summary(report: &ReportV1) -> String {
     let mut parts = Vec::new();
+    let formatted = report
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "format.written")
+        .count();
+    if formatted > 0 {
+        parts.push(format!(
+            "{formatted} {} formatted",
+            plural(formatted, "file")
+        ));
+    }
+    for disposition in [
+        "verified",
+        "accepted",
+        "already_current",
+        "source_mismatch",
+        "blocked",
+    ] {
+        let count = report
+            .migrations
+            .iter()
+            .filter(|entry| {
+                entry
+                    .rehash
+                    .as_ref()
+                    .is_some_and(|rehash| rehash.disposition == disposition)
+            })
+            .count();
+        if count > 0 {
+            parts.push(format!("{count} {}", disposition.replace('_', " ")));
+        }
+    }
 
     let applied = count(report, Action::Deploy, Status::Succeeded);
     let verified = count(report, Action::Verify, Status::Succeeded);
@@ -179,6 +211,7 @@ fn write_migration(
         (Action::Verify, _) => "verify",
         (Action::Revert, _) => "revert",
         (Action::Baseline, _) => "baseline",
+        (Action::Rehash, _) => "rehash",
     };
     let timing = migration
         .duration_ms
@@ -186,6 +219,27 @@ fn write_migration(
         .unwrap_or_default();
 
     writeln!(out, "{mark} {verb} {id} {}{timing}", migration.slug)?;
+    if let Some(rehash) = &migration.rehash {
+        writeln!(
+            out,
+            "    {}{}: {} -> {}",
+            if rehash.dry_run { "preview " } else { "" },
+            rehash.disposition.replace('_', " "),
+            rehash.old_definition_algorithm,
+            rehash.new_definition_algorithm
+        )?;
+        if rehash.disposition == "accepted" {
+            writeln!(
+                out,
+                "    Operator assertion {}: cosmetic equivalence and database state were not verified.",
+                if rehash.committed {
+                    "committed; current SQL adopted"
+                } else {
+                    "proposed; current SQL has not been adopted"
+                }
+            )?;
+        }
+    }
 
     if let Some(error) = &migration.error {
         for line in describe(error) {
@@ -445,6 +499,8 @@ mod tests {
             status,
             transaction: TransactionMode::Required,
             definition_sha256: "0".repeat(64),
+            definition_algorithm: None,
+            rehash: None,
             scripts: Vec::new(),
             duration_ms: Some(35),
             error: None,

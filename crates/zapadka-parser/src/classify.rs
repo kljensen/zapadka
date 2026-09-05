@@ -358,30 +358,16 @@ impl ConstraintKind {
 }
 
 /// Converts a parse tree into [`ParsedScript`].
-pub(crate) fn classify(tree: &str, script: &str) -> ParsedScript {
-    // The tree came straight from `pg_query_parse`, which emits well-formed
-    // JSON; a malformed tree degrades to "no statements" rather than panicking.
-    let root: Value = serde_json::from_str(tree).unwrap_or(Value::Null);
-    // A PG_VERSION_NUM never approaches u32::MAX; a value that did would mean
-    // the tree is not a parse tree, so reporting 0 is the honest answer.
-    let parser_version = root
-        .get("version")
-        .and_then(Value::as_u64)
-        .and_then(|version| u32::try_from(version).ok())
-        .unwrap_or_default();
-
+pub(crate) fn classify(tree: &crate::tree::Tree, script: &str) -> ParsedScript {
     let line_index = LineIndex::new(script);
-    let statements = root
-        .get("stmts")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
+    let statements = tree
+        .statements
         .iter()
-        .filter_map(|raw| statement(raw, &line_index))
+        .map(|raw| statement(raw, &line_index).expect("shared decoder validates statement nodes"))
         .collect();
 
     ParsedScript {
-        parser_version,
+        parser_version: tree.version,
         statements,
     }
 }

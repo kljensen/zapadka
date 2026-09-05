@@ -152,7 +152,7 @@ docker exec "$CONTAINER" psql -U postgres -d app -tAc \
     WHERE table_schema='app' AND table_name='orders'" | grep -q '^3$' \
   || { echo "FAIL: the orders table does not have the expected columns"; exit 1; }
 
-say "a modified deployed migration is detected"
+say "structural hashing permits comments and rehash is an idempotent no-op"
 
 # Edited from inside a container, on the same mount Zapadka reads through.
 # Editing from the host and waiting for the change to appear made this test a
@@ -161,6 +161,25 @@ docker run --rm ${ZAPADKA_PLATFORM:+--platform "$ZAPADKA_PLATFORM"} \
   --user "$(id -u):$(id -g)" \
   -v "$WORKDIR:/w" "$RUNNER_IMAGE" \
   sh -c "echo '-- an edit made after deployment' >> '/w/migrations/$FIRST/deploy.sql'"
+
+zapadka status --uri "$URI"
+zapadka rehash --uri "$URI" --dry-run --output json > "$WORKDIR/rehash-preview.json"
+grep -q '"disposition": "already_current"' "$WORKDIR/rehash-preview.json" \
+  || { echo "FAIL: structural migrations should already be current"; exit 1; }
+zapadka rehash --uri "$URI"
+zapadka rehash --uri "$URI"
+docker exec "$CONTAINER" psql -U postgres -d app -tAc \
+  "SELECT count(*) FROM zapadka.rehash_events" | grep -q '^0$' \
+  || { echo "FAIL: a no-op rehash must not create audit events"; exit 1; }
+docker exec "$CONTAINER" psql -U postgres -d app -tAc \
+  "SELECT count(*) FROM zapadka.applied_migrations WHERE definition_algorithm = 'structural-v1'" | grep -q '^2$' \
+  || { echo "FAIL: new migrations must record structural identities"; exit 1; }
+
+say "a substantive deployed migration edit is detected"
+docker run --rm ${ZAPADKA_PLATFORM:+--platform "$ZAPADKA_PLATFORM"} \
+  --user "$(id -u):$(id -g)" \
+  -v "$WORKDIR:/w" "$RUNNER_IMAGE" \
+  sh -c "echo 'SELECT 42;' >> '/w/migrations/$FIRST/deploy.sql'"
 
 if zapadka status --uri "$URI" --output json > "$WORKDIR/tampered.json" 2>/dev/null; then
   echo "FAIL: editing a deployed migration should have failed"

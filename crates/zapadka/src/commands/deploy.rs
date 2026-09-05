@@ -97,7 +97,7 @@ async fn deploy_under_lock(
 ) -> (zapadka_pg::Client, Result<()>) {
     // Read again now the lock is held. The state gathered while connecting is a
     // snapshot of a database another run may have been changing.
-    let state = match target::refresh_state(&client, config, schema).await {
+    let state = match target::refresh_state(&mut client, config, schema).await {
         Ok(state) => state,
         Err(error) => return (client, Err(error)),
     };
@@ -139,7 +139,10 @@ async fn deploy_under_lock(
         // what they do to the data.
         for id in &plan.pending {
             if let Some(migration) = graph.get(*id) {
-                session.migrations.push(planned(migration));
+                match planned(migration) {
+                    Ok(result) => session.migrations.push(result),
+                    Err(error) => return (client, Err(error)),
+                }
             }
         }
         return (client, Ok(()));
@@ -180,12 +183,12 @@ async fn apply_all(
         if failure.is_some() {
             session.migrations.push(MigrationResult {
                 status: Status::Skipped,
-                ..planned(migration)
+                ..planned(migration)?
             });
             continue;
         }
 
-        let (result, error) = apply_one(migration, args, runner).await;
+        let (result, error) = apply_one(migration, args, runner).await?;
         session.migrations.push(result);
         failure = error;
     }
@@ -205,7 +208,8 @@ async fn apply_one(
     migration: &Migration,
     args: &DeployArgs,
     runner: &mut Runner,
-) -> (MigrationResult, Option<Error>) {
+) -> Result<(MigrationResult, Option<Error>)> {
+    let mut result = result_of(migration, Action::Deploy, Status::Succeeded)?;
     // Which path a migration takes is a property of the migration, decided by
     // its manifest and validated long before this point.
     let execution = if migration.manifest.transaction == Transaction::Forbidden {
@@ -217,7 +221,7 @@ async fn apply_one(
     let deployed = match execution {
         Ok(deployed) => deployed,
         Err(error) => {
-            let mut result = result_of(migration, Action::Deploy, Status::Failed);
+            result.status = Status::Failed;
             result.scripts.push(failed_script(
                 ScriptRole::Deploy,
                 &migration.deploy.relative_path,
@@ -226,16 +230,15 @@ async fn apply_one(
                 runner.take_server_messages(),
             ));
             result.error = Some((&error).into());
-            return (result, Some(error));
+            return Ok((result, Some(error)));
         }
     };
 
-    let mut result = result_of(migration, Action::Deploy, Status::Succeeded);
     result.duration_ms = Some(deployed.duration_ms);
     result.scripts.push(script_of(&deployed, Status::Succeeded));
 
     if !args.should_verify() {
-        return (result, None);
+        return Ok((result, None));
     }
 
     // Verification runs after the commit, so it observes exactly what a later
@@ -243,10 +246,10 @@ async fn apply_one(
     match runner.verify(migration).await {
         Ok(Some(verified)) => {
             result.scripts.push(script_of(&verified, Status::Succeeded));
-            (result, None)
+            Ok((result, None))
         }
         // No verify.sql. Not a failure: verification is opt-in per migration.
-        Ok(None) => (result, None),
+        Ok(None) => Ok((result, None)),
         Err(error) => {
             // The migration stays applied. It committed, and pretending
             // otherwise would make the report lie. The script that failed is
@@ -262,7 +265,7 @@ async fn apply_one(
                 ));
             }
             result.error = Some((&error).into());
-            (result, Some(error))
+            Ok((result, Some(error)))
         }
     }
 }
@@ -287,23 +290,57 @@ fn failed_script(
 }
 
 /// The report entry for a migration a dry run would apply.
-fn planned(migration: &Migration) -> MigrationResult {
+fn planned(migration: &Migration) -> Result<MigrationResult> {
     result_of(migration, Action::Plan, Status::Pending)
 }
 
 /// Builds a report entry for a migration.
-pub fn result_of(migration: &Migration, action: Action, status: Status) -> MigrationResult {
+pub fn result_of(migration: &Migration, action: Action, status: Status) -> Result<MigrationResult> {
+    Ok(build_result(
+        migration,
+        action,
+        status,
+        migration.structural_definition_sha256()?,
+        zapadka_core::manifest::STRUCTURAL_DEFINITION_ALGORITHM.to_owned(),
+    ))
+}
+
+fn build_result(
+    migration: &Migration,
+    action: Action,
+    status: Status,
+    definition_sha256: String,
+    definition_algorithm: String,
+) -> MigrationResult {
     MigrationResult {
         id: migration.id,
         slug: migration.slug.clone(),
         action,
         status,
         transaction: migration.manifest.transaction.to_report(),
-        definition_sha256: migration.definition_sha256.clone(),
+        definition_sha256,
+        definition_algorithm: Some(definition_algorithm),
+        rehash: None,
         scripts: Vec::new(),
         duration_ms: None,
         error: None,
     }
+}
+
+/// Builds a result directly from the identity validated against the target.
+pub fn recorded_result_of(
+    migration: &Migration,
+    action: Action,
+    status: Status,
+    row: &zapadka_pg::registry::AppliedMigration,
+) -> MigrationResult {
+    build_result(
+        migration,
+        action,
+        status,
+        row.definition_sha256.clone(),
+        row.definition_algorithm.clone(),
+    )
 }
 
 /// Builds a report entry for an executed script.
@@ -316,5 +353,23 @@ pub fn script_of(outcome: &ScriptOutcome, status: Status) -> Script {
         duration_ms: Some(outcome.duration_ms),
         server_messages: outcome.server_messages.clone(),
         error: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::panic)]
+    use super::*;
+    use crate::testing::{temp_project, write_migration};
+
+    #[test]
+    fn an_invalid_structural_definition_is_an_error_not_a_legacy_report() {
+        let project = temp_project();
+        write_migration(project.path(), "broken", &[], "SELECT FROM;");
+        let (_, graph) = crate::commands::load_project(project.path()).unwrap();
+        let migration = graph.migrations().next().unwrap();
+        let error = result_of(migration, Action::Plan, Status::Pending).unwrap_err();
+        assert_eq!(error.code, zapadka_core::error::ErrorCode::ScriptParseError);
+        assert!(error.location().is_some());
     }
 }

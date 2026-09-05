@@ -1,17 +1,19 @@
 //! Zapadka's registry: what a database records about its own migration history.
 //!
-//! Four tables in a reserved schema:
+//! Five tables in a reserved schema:
 //!
 //! - `meta` — one row, naming the project that owns this database and the
 //!   registry format version.
 //! - `applied_migrations` — current state. One row per successfully applied
-//!   migration, holding the immutable facts that history integrity is checked
-//!   against.
+//!   migration, holding its comparison definition and algorithm alongside
+//!   original deployment evidence.
 //! - `events` — append-only history. Every deploy, verify, revert, baseline,
 //!   and failure, with the diagnostics needed to explain it later.
 //! - `nontransactional_attempts` — normally empty. One row per statement that
 //!   was started outside a transaction and whose outcome nobody observed. A row
 //!   here blocks the target until a person resolves it.
+//! - `rehash_events` — append-only comparison-policy transitions, preserving
+//!   old/new identities and verified or operator-accepted provenance.
 //!
 //! Splitting current state from history is deliberate. `status` must be a cheap
 //! read of a small table, while an incident review needs everything that ever
@@ -35,7 +37,12 @@ use zapadka_core::manifest::Transaction;
 use crate::error::registry_failed;
 
 /// The registry format this binary writes.
-pub const REGISTRY_FORMAT_VERSION: i32 = 2;
+pub const REGISTRY_FORMAT_VERSION: i32 = 3;
+
+/// Exact source-byte definition policy used by historical registries.
+pub const RAW_V1: &str = zapadka_core::manifest::LEGACY_DEFINITION_ALGORITHM;
+/// PostgreSQL structural definition policy.
+pub const STRUCTURAL_V1: &str = zapadka_core::manifest::STRUCTURAL_DEFINITION_ALGORITHM;
 
 /// One registry format version and the SQL that creates it.
 struct Upgrade {
@@ -57,7 +64,61 @@ const UPGRADES: &[Upgrade] = &[
         version: 2,
         sql: nontransactional_attempts,
     },
+    Upgrade {
+        version: 3,
+        sql: structural_definitions,
+    },
 ];
+
+fn structural_definitions(schema: &str) -> String {
+    format!(
+        r"
+ALTER TABLE {schema}.applied_migrations
+    ADD COLUMN definition_algorithm text NOT NULL DEFAULT 'raw-v1';
+ALTER TABLE {schema}.nontransactional_attempts
+    ADD COLUMN definition_algorithm text NOT NULL DEFAULT 'raw-v1';
+ALTER TABLE {schema}.events
+    ADD COLUMN definition_algorithm text DEFAULT 'raw-v1';
+CREATE TABLE {schema}.rehash_events (
+    run_id uuid NOT NULL,
+    migration_id uuid NOT NULL,
+    recorded_at timestamptz NOT NULL DEFAULT now(),
+    old_algorithm text NOT NULL,
+    old_definition_sha256 text NOT NULL,
+    new_algorithm text NOT NULL,
+    new_definition_sha256 text NOT NULL,
+    original_deploy_sha256 text NOT NULL,
+    current_deploy_sha256 text NOT NULL,
+    provenance text NOT NULL CHECK (provenance IN ('verified', 'operator-accepted')),
+    reason text,
+    session_user_name text NOT NULL,
+    current_user_name text NOT NULL,
+    server_version text NOT NULL,
+    zapadka_version text NOT NULL,
+    PRIMARY KEY (run_id, migration_id),
+    CHECK (provenance <> 'operator-accepted' OR (reason IS NOT NULL AND btrim(reason) <> ''))
+);
+CREATE TRIGGER rehash_events_append_only
+    BEFORE UPDATE OR DELETE ON {schema}.rehash_events
+    FOR EACH ROW EXECUTE FUNCTION {schema}.events_are_append_only();
+CREATE TRIGGER rehash_events_no_truncate
+    BEFORE TRUNCATE ON {schema}.rehash_events
+    FOR EACH STATEMENT EXECUTE FUNCTION {schema}.events_are_append_only();
+"
+    )
+}
+
+/// Rejects a comparison policy this binary cannot reproduce.
+pub fn check_definition_algorithm(algorithm: &str) -> Result<()> {
+    if matches!(algorithm, RAW_V1 | STRUCTURAL_V1) {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::RegistryFormatTooNew,
+        format!("unknown migration definition algorithm {algorithm}"),
+    )
+    .with_hint("upgrade Zapadka to a version that understands this definition algorithm"))
+}
 
 /// The SQL moving a registry from format 1 to format 2.
 ///
@@ -101,6 +162,8 @@ COMMENT ON TABLE {schema}.nontransactional_attempts IS
 /// A nontransactional run that was started and never resolved.
 #[derive(Debug, Clone)]
 pub struct UnresolvedAttempt {
+    /// The comparison policy recorded when execution began.
+    pub definition_algorithm: String,
     /// The migration whose statement was in flight.
     pub id: Uuid,
     /// Its slug at the time of the attempt.
@@ -228,12 +291,14 @@ impl RegistryState {
 /// One applied migration, as the database recorded it.
 #[derive(Debug, Clone)]
 pub struct AppliedMigration {
+    /// The policy used by the active comparison hash.
+    pub definition_algorithm: String,
     /// The migration's permanent UUIDv7 identity.
     pub id: Uuid,
     /// Its slug as of the deploy that applied it.
     pub slug: String,
-    /// The definition hash at the time it was applied. History integrity is
-    /// this value compared against the checked-out project.
+    /// The active comparison hash. Rehash may replace this value atomically
+    /// with append-only evidence of both identities; deployment facts remain.
     pub definition_sha256: String,
     /// SHA-256 of the `deploy.sql` that was executed.
     pub deploy_sha256: String,
@@ -469,16 +534,39 @@ pub async fn check_database_ownership(
 ///
 /// A database with no registry is a normal state, not an error: it is what
 /// every project's first deploy meets.
-pub async fn read(client: &Client, schema: &str) -> Result<RegistryState> {
+pub async fn read(client: &mut Client, schema: &str) -> Result<RegistryState> {
+    // Registry upgrades add tables and change the meaning of rows. Reading
+    // metadata and state from separate snapshots could omit a newly committed
+    // attempt or combine a historical version with newer comparison identities.
+    let transaction = client
+        .build_transaction()
+        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
+        .await
+        .map_err(|error| registry_failed(error, "begin a registry read snapshot"))?;
+    let state = read_snapshot(&transaction, schema).await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| registry_failed(error, "finish the registry read snapshot"))?;
+    Ok(state)
+}
+
+async fn read_snapshot(
+    client: &tokio_postgres::Transaction<'_>,
+    schema: &str,
+) -> Result<RegistryState> {
     let quoted = quote_identifier(schema);
 
     let exists: bool = client
         .query_one(
-            "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)",
+            "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = 'meta' AND c.relkind IN ('r', 'p'))",
             &[&schema],
         )
         .await
-        .map_err(|error| registry_failed(error, "look for the registry schema"))?
+        .map_err(|error| registry_failed(error, "look for registry metadata"))?
         .get(0);
 
     if !exists {
@@ -490,27 +578,15 @@ pub async fn read(client: &Client, schema: &str) -> Result<RegistryState> {
         });
     }
 
-    // The schema existing does not mean the registry does. `registry_schema`
-    // may name a schema that already exists for other reasons -- `public` being
-    // the obvious case -- and a first deploy into it must work.
-    let meta = match client
+    // The catalog check above distinguishes an existing application schema
+    // from an initialized registry without raising an error in this snapshot.
+    let meta = client
         .query_opt(
             &format!("SELECT project_id, registry_format_version FROM {quoted}.meta"),
             &[],
         )
         .await
-    {
-        Ok(meta) => meta,
-        Err(error)
-            if error
-                .as_db_error()
-                .map(tokio_postgres::error::DbError::code)
-                == Some(&tokio_postgres::error::SqlState::UNDEFINED_TABLE) =>
-        {
-            None
-        }
-        Err(error) => return Err(registry_failed(error, "read the registry metadata")),
-    };
+        .map_err(|error| registry_failed(error, "read the registry metadata"))?;
 
     let (project_id, format_version) = match meta {
         Some(row) => (Some(row.get::<_, Uuid>(0)), Some(row.get::<_, i32>(1))),
@@ -531,6 +607,19 @@ pub async fn read(client: &Client, schema: &str) -> Result<RegistryState> {
         .with_hint("a newer Zapadka has deployed to this database; upgrade this binary")
         .with_context("registry_format_version", version)
         .with_context("supported_format_version", REGISTRY_FORMAT_VERSION));
+    }
+
+    if let Some(version) = format_version
+        && version < 1
+    {
+        return Err(Error::new(
+            ErrorCode::RegistryUpgradeFailed,
+            "the registry declares an invalid format version",
+        )
+        .with_context("registry_format_version", version)
+        .with_hint(
+            "restore valid registry metadata from a backup; supported registry formats start at 1",
+        ));
     }
 
     // No metadata means no registry, whatever else the schema contains. Reading
@@ -570,22 +659,25 @@ pub async fn read(client: &Client, schema: &str) -> Result<RegistryState> {
 /// lock by design, so it would report the migration as plain pending, which is
 /// a state that never existed.
 ///
-/// Under read committed a single statement sees a single snapshot, so the union
-/// cannot straddle that commit.
+/// The union shares the read transaction's snapshot with registry metadata,
+/// so table availability and rows describe the same point in history.
 async fn read_state(
-    client: &Client,
+    client: &tokio_postgres::Transaction<'_>,
     quoted: &str,
     has_attempts: bool,
 ) -> Result<(
     BTreeMap<Uuid, AppliedMigration>,
     BTreeMap<Uuid, UnresolvedAttempt>,
 )> {
+    // Read the policy from the row shape itself so legacy tables need no
+    // schema changes before a read-only command can interpret their rows.
+    let algorithm = "COALESCE(to_jsonb(m)->>'definition_algorithm', 'raw-v1')";
     let attempts = if has_attempts {
         format!(
             " UNION ALL \
              SELECT 'attempt', migration_id, slug, definition_sha256, deploy_sha256, depends, \
-                    'forbidden', started_at::text, run_id, session_user_name \
-             FROM {quoted}.nontransactional_attempts"
+                    'forbidden', started_at::text, run_id, session_user_name, {algorithm} \
+             FROM {quoted}.nontransactional_attempts m"
         )
     } else {
         String::new()
@@ -595,8 +687,8 @@ async fn read_state(
         .query(
             &format!(
                 "SELECT 'applied' AS kind, migration_id, slug, definition_sha256, deploy_sha256, \
-                        depends, transaction_mode, applied_at::text, NULL::uuid, NULL::text \
-                 FROM {quoted}.applied_migrations{attempts} \
+                        depends, transaction_mode, applied_at::text, NULL::uuid, NULL::text, {algorithm} \
+                 FROM {quoted}.applied_migrations m{attempts} \
                  ORDER BY 1, 2"
             ),
             &[],
@@ -609,10 +701,13 @@ async fn read_state(
     for row in rows {
         let kind: &str = row.get(0);
         let id: Uuid = row.get(1);
+        let definition_algorithm: String = row.get(10);
+        check_definition_algorithm(&definition_algorithm)?;
         if kind == "applied" {
             applied.insert(
                 id,
                 AppliedMigration {
+                    definition_algorithm,
                     id,
                     slug: row.get(2),
                     definition_sha256: row.get(3),
@@ -626,6 +721,7 @@ async fn read_state(
             unresolved.insert(
                 id,
                 UnresolvedAttempt {
+                    definition_algorithm,
                     id,
                     slug: row.get(2),
                     definition_sha256: row.get(3),
@@ -663,6 +759,34 @@ pub async fn upgrade(
         .await
         .map_err(|error| registry_failed(error, "begin the registry upgrade"))?;
 
+    upgrade_in_transaction(&transaction, schema, project_id, zapadka_version, state).await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| registry_failed(error, "commit the registry upgrade"))?;
+    Ok(REGISTRY_FORMAT_VERSION)
+}
+
+/// Upgrades within the caller's transaction, allowing an atomic rehash batch.
+pub async fn upgrade_in_transaction(
+    transaction: &tokio_postgres::Transaction<'_>,
+    schema: &str,
+    project_id: Uuid,
+    zapadka_version: &str,
+    state: &RegistryState,
+) -> Result<()> {
+    check_project(state, project_id)?;
+    let current = state.format_version.unwrap_or(0);
+    if current > REGISTRY_FORMAT_VERSION {
+        return Err(Error::new(
+            ErrorCode::RegistryFormatTooNew,
+            "registry format is newer than this binary",
+        ));
+    }
+    if current == REGISTRY_FORMAT_VERSION {
+        return Ok(());
+    }
+
     for step in UPGRADES.iter().filter(|step| step.version > current) {
         transaction
             .batch_execute(&(step.sql)(&quote_identifier(schema)))
@@ -695,12 +819,7 @@ pub async fn upgrade(
             .map_err(|error| registry_failed(error, "record the registry format version"))?;
     }
 
-    transaction
-        .commit()
-        .await
-        .map_err(|error| registry_failed(error, "commit the registry upgrade"))?;
-
-    Ok(REGISTRY_FORMAT_VERSION)
+    Ok(())
 }
 
 /// Refuses to act on a database that belongs to a different project.
@@ -741,6 +860,7 @@ pub async fn record_attempt(
     schema: &str,
     run_id: Uuid,
     migration: &zapadka_core::migration::Migration,
+    definition: &str,
     facts: &ServerFacts,
     zapadka_version: &str,
 ) -> Result<()> {
@@ -753,19 +873,20 @@ pub async fn record_attempt(
             &format!(
                 "INSERT INTO {quoted}.nontransactional_attempts \
                     (migration_id, slug, definition_sha256, deploy_sha256, depends, run_id, \
-                     session_user_name, server_version, zapadka_version) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+                     session_user_name, server_version, zapadka_version, definition_algorithm) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"
             ),
             &[
                 &migration.id,
                 &migration.slug,
-                &migration.definition_sha256,
+                &definition,
                 &migration.deploy.sha256,
                 &depends,
                 &run_id,
                 &facts.session_user,
                 &facts.server_version,
                 &zapadka_version,
+                &STRUCTURAL_V1,
             ],
         )
         .await
@@ -814,8 +935,8 @@ pub async fn record_applied_from_attempt(
             &format!(
                 "INSERT INTO {quoted}.applied_migrations \
                     (migration_id, slug, definition_sha256, deploy_sha256, depends, \
-                     transaction_mode, run_id) \
-                 VALUES ($1, $2, $3, $4, $5, 'forbidden', $6)"
+                     transaction_mode, run_id, definition_algorithm) \
+                 VALUES ($1, $2, $3, $4, $5, 'forbidden', $6, $7)"
             ),
             &[
                 &attempt.id,
@@ -824,6 +945,7 @@ pub async fn record_applied_from_attempt(
                 &attempt.deploy_sha256,
                 &depends,
                 &run_id,
+                &attempt.definition_algorithm,
             ],
         )
         .await
@@ -837,6 +959,7 @@ pub async fn record_applied(
     schema: &str,
     run_id: Uuid,
     migration: &zapadka_core::migration::Migration,
+    definition: &str,
 ) -> Result<()> {
     let quoted = quote_identifier(schema);
     let mode = migration.manifest.transaction.as_str();
@@ -850,17 +973,18 @@ pub async fn record_applied(
             &format!(
                 "INSERT INTO {quoted}.applied_migrations \
                     (migration_id, slug, definition_sha256, deploy_sha256, depends, \
-                     transaction_mode, run_id) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)"
+                     transaction_mode, run_id, definition_algorithm) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
             ),
             &[
                 &migration.id,
                 &migration.slug,
-                &migration.definition_sha256,
+                &definition,
                 &migration.deploy.sha256,
                 &depends,
                 &mode,
                 &run_id,
+                &STRUCTURAL_V1,
             ],
         )
         .await

@@ -157,6 +157,11 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target "${{ matrix.target }}" -p zapadka
 
+      - name: Verify structural hash compatibility on the release target
+        run: |
+          cargo test --release --locked --target "${{ matrix.target }}" -p zapadka-parser canonical::tests
+          cargo test --release --locked --target "${{ matrix.target }}" -p zapadka-core structural_hash
+
       - name: Inspect linkage and smoke test
         run: |
           binary="target/${{ matrix.target }}/release/zapadka"
@@ -244,6 +249,11 @@ jobs:
         run: |
           cargo build --release --locked --target x86_64-pc-windows-msvc -p zapadka
           target/x86_64-pc-windows-msvc/release/zapadka.exe --version
+
+      - name: Verify structural hash compatibility on the release target
+        run: |
+          cargo test --release --locked --target x86_64-pc-windows-msvc -p zapadka-parser canonical::tests
+          cargo test --release --locked --target x86_64-pc-windows-msvc -p zapadka-core structural_hash
 
       - name: Prove the build is reproducible
         run: |

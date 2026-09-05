@@ -58,10 +58,17 @@ pub async fn run(
     let plan = history::plan(graph, &opened.state.applied)?;
 
     for id in &plan.applied {
-        if let Some(migration) = graph.get(*id) {
+        if let Some(migration) = graph.get(*id)
+            && let Some(row) = opened.state.applied.get(id)
+        {
             session
                 .migrations
-                .push(result_of(migration, Action::Plan, Status::Applied));
+                .push(crate::commands::deploy::recorded_result_of(
+                    migration,
+                    Action::Plan,
+                    Status::Applied,
+                    row,
+                ));
         }
     }
     for id in &plan.pending {
@@ -75,7 +82,7 @@ pub async fn run(
         if let Some(migration) = graph.get(*id) {
             session
                 .migrations
-                .push(result_of(migration, Action::Plan, Status::Pending));
+                .push(result_of(migration, Action::Plan, Status::Pending)?);
         }
     }
 
@@ -91,6 +98,8 @@ pub async fn run(
             status: Status::Blocked,
             transaction: TransactionMode::Forbidden,
             definition_sha256: attempt.definition_sha256.clone(),
+            definition_algorithm: Some(attempt.definition_algorithm.clone()),
+            rehash: None,
             scripts: Vec::new(),
             duration_ms: None,
             error: None,

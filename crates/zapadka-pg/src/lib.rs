@@ -15,6 +15,7 @@ pub mod execute;
 pub mod history;
 pub mod lock;
 pub mod registry;
+pub mod rehash;
 pub mod service;
 pub mod testlib;
 pub mod testrun;

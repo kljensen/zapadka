@@ -2,8 +2,9 @@
 //!
 //! # Why a command exists for this at all
 //!
-//! Everything else Zapadka records, it observed. This records what a person
-//! says, and it is the only place that happens.
+//! This records a person's account of an interrupted statement. Like baseline
+//! and explicit rehash acceptance, it distinguishes an operator's assertion
+//! from an outcome Zapadka observed.
 //!
 //! The need comes from a fact about PostgreSQL rather than a choice Zapadka
 //! made. A `CREATE INDEX CONCURRENTLY` cannot run inside a transaction, so its
@@ -102,7 +103,7 @@ async fn resolve_under_lock(
     graph: &Graph,
     args: &ResolveArgs,
     session: &mut Session,
-    client: zapadka_pg::Client,
+    mut client: zapadka_pg::Client,
     name: &str,
     schema: &str,
     timeouts: zapadka_pg::Timeouts,
@@ -111,7 +112,7 @@ async fn resolve_under_lock(
 ) -> (zapadka_pg::Client, Result<()>) {
     // Read under the lock. A resolve races a deploy by definition -- the deploy
     // that is blocked is often running in the next terminal window.
-    let state = match target::refresh_state(&client, config, schema).await {
+    let state = match target::refresh_state(&mut client, config, schema).await {
         Ok(state) => state,
         Err(error) => return (client, Err(error)),
     };
@@ -124,6 +125,17 @@ async fn resolve_under_lock(
         Err(error) => return (client, Err(error)),
     };
 
+    if let Err(error) = target::claim_and_upgrade(
+        &mut client,
+        config,
+        schema,
+        &state,
+        config.config.policy.advisory_lock_timeout,
+    )
+    .await
+    {
+        return (client, Err(error));
+    }
     let mut runner = Runner::new(
         client,
         schema.to_owned(),
@@ -251,6 +263,8 @@ fn result_of(attempt: &UnresolvedAttempt) -> MigrationResult {
         status: Status::Succeeded,
         transaction: zapadka_core::report::TransactionMode::Forbidden,
         definition_sha256: attempt.definition_sha256.clone(),
+        definition_algorithm: Some(attempt.definition_algorithm.clone()),
+        rehash: None,
         scripts: Vec::new(),
         duration_ms: None,
         error: None,

@@ -7,7 +7,11 @@
 //! A test binary has no public API; `pub` here means "visible to this file".
 #![allow(unreachable_pub)]
 
+mod canonical_guards;
 mod harness;
+mod report_contract;
+mod transition;
+mod transition_commands;
 
 use harness::{database, project};
 
@@ -102,7 +106,7 @@ fn deploys_an_empty_project_without_creating_anything_unexpected() {
     );
     assert_eq!(
         db.scalar("SELECT registry_format_version FROM zapadka.meta"),
-        "2"
+        "3"
     );
 }
 

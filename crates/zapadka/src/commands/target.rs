@@ -33,12 +33,12 @@ pub async fn open(
     let target = config.config.targets.get(&name);
 
     let resolved = zapadka_pg::resolve(&name, target, args.uri.as_deref())?;
-    let connection = zapadka_pg::connect(&resolved).await?;
+    let mut connection = zapadka_pg::connect(&resolved).await?;
 
     // Version first: every later check assumes a PostgreSQL 18 catalog.
     let facts = registry::server_facts(&connection.client).await?;
     let schema = config.config.project.registry_schema.clone();
-    let state = registry::read(&connection.client, &schema).await?;
+    let state = registry::read(&mut connection.client, &schema).await?;
 
     // Before any command uses this state. An initialized registry belonging to
     // a different project would otherwise be read as if it were ours, and a
@@ -163,7 +163,7 @@ fn select(config: &LoadedConfig, args: &TargetArgs) -> Result<String> {
 /// So mutating commands read once to report the target and check the server,
 /// then read again under the lock and decide from that.
 pub async fn refresh_state(
-    client: &zapadka_pg::Client,
+    client: &mut zapadka_pg::Client,
     config: &LoadedConfig,
     schema: &str,
 ) -> Result<RegistryState> {
