@@ -65,6 +65,8 @@ pub enum Command {
 
     /// Record migrations as applied without running them.
     Baseline(BaselineArgs),
+    /// Transition applied migrations to structural hashing without running SQL.
+    Rehash(RehashArgs),
 
     /// Run database tests against a prepared test target.
     Test(TestArgs),
@@ -86,6 +88,7 @@ impl Command {
             Self::Verify(_) => "verify",
             Self::Revert(_) => "revert",
             Self::Baseline(_) => "baseline",
+            Self::Rehash(_) => "rehash",
             Self::Test(_) => "test",
             Self::Resolve(_) => "resolve",
         }
@@ -108,7 +111,8 @@ pub struct FormatArgs {
     #[arg(long, conflicts_with = "check")]
     pub write: bool,
 
-    /// Permit rewriting deploy.sql, which changes a migration's immutable definition.
+    /// Deprecated compatibility flag. Deploy rewrites always require structural equivalence.
+    /// Rehash targets using raw-v1 before formatting deployed migrations.
     #[arg(long, requires = "write")]
     pub allow_deploy_rewrite: bool,
 }
@@ -243,6 +247,33 @@ pub struct BaselineArgs {
     pub wait: Option<Timeout>,
 }
 
+/// Options for transitioning already-applied definitions.
+#[derive(Debug, Args)]
+pub struct RehashArgs {
+    #[command(flatten)]
+    pub target: TargetArgs,
+    /// Preview without writing or upgrading the registry.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Assert that changed legacy SQL is the future comparison baseline.
+    #[arg(long, requires = "reason")]
+    pub accept_current: bool,
+    /// Explain the assertion; it does not prove edits were cosmetic.
+    #[arg(long, requires = "accept_current", value_parser = parse_reason)]
+    pub reason: Option<String>,
+    /// How long to wait for the deployment lock.
+    #[arg(long, value_name = "DURATION", value_parser = parse_timeout)]
+    pub wait: Option<Timeout>,
+}
+
+fn parse_reason(text: &str) -> Result<String, String> {
+    if text.trim().is_empty() {
+        Err("reason must not be blank".to_owned())
+    } else {
+        Ok(text.to_owned())
+    }
+}
+
 #[derive(Debug, Args)]
 pub struct TestArgs {
     #[command(flatten)]
@@ -258,11 +289,9 @@ pub struct TestArgs {
 
 /// `zapadka resolve` — the operator's account of an interrupted statement.
 ///
-/// This is the only command that writes applied state from a human assertion
-/// rather than from something Zapadka observed. It exists because a
-/// nontransactional statement whose connection died leaves a question only a
-/// person can answer, and the alternative to answering it is a target nothing
-/// can deploy to.
+/// Records an operator assertion about a nontransactional statement whose
+/// connection died. The target stays blocked until that outcome is resolved;
+/// the audit distinguishes this assertion from an observed execution.
 #[derive(Debug, Args)]
 pub struct ResolveArgs {
     #[command(flatten)]
@@ -304,6 +333,31 @@ mod tests {
     #[test]
     fn the_command_line_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn rehash_acceptance_requires_a_nonblank_reason() {
+        for args in [
+            vec!["zapadka", "rehash", "--accept-current"],
+            vec!["zapadka", "rehash", "--accept-current", "--reason", "   "],
+            vec!["zapadka", "rehash", "--reason", "formatting"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        let Command::Rehash(args) = parse(&[
+            "rehash",
+            "--dry-run",
+            "--accept-current",
+            "--reason",
+            "reviewed edits",
+        ])
+        .command
+        else {
+            unreachable!()
+        };
+        assert!(args.dry_run);
+        assert!(args.accept_current);
+        assert_eq!(args.reason.as_deref(), Some("reviewed edits"));
     }
 
     fn parse(args: &[&str]) -> Cli {

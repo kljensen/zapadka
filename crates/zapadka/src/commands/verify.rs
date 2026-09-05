@@ -21,7 +21,7 @@ use zapadka_pg::execute::Runner;
 use zapadka_pg::{history, lock};
 
 use crate::cli::VerifyArgs;
-use crate::commands::{deploy::result_of, deploy::script_of, target};
+use crate::commands::{deploy::recorded_result_of, deploy::script_of, target};
 use crate::session::Session;
 
 /// Runs `zapadka verify`.
@@ -81,14 +81,14 @@ async fn verify_under_lock(
     graph: &Graph,
     args: &VerifyArgs,
     session: &mut Session,
-    client: zapadka_pg::Client,
+    mut client: zapadka_pg::Client,
     schema: &str,
     name: &str,
     facts: zapadka_pg::ServerFacts,
     timeouts: zapadka_pg::Timeouts,
     server_messages: zapadka_pg::ServerMessages,
 ) -> (zapadka_pg::Client, Result<()>) {
-    let state = match target::refresh_state(&client, config, schema).await {
+    let state = match target::refresh_state(&mut client, config, schema).await {
         Ok(state) => state,
         Err(error) => return (client, Err(error)),
     };
@@ -109,6 +109,17 @@ async fn verify_under_lock(
         Err(error) => return (client, Err(error)),
     };
 
+    if let Err(error) = target::claim_and_upgrade(
+        &mut client,
+        config,
+        schema,
+        &state,
+        config.config.policy.advisory_lock_timeout,
+    )
+    .await
+    {
+        return (client, Err(error));
+    }
     let mut runner = Runner::new(
         client,
         schema.to_owned(),
@@ -118,7 +129,7 @@ async fn verify_under_lock(
         timeouts,
         server_messages,
     );
-    let outcome = verify_all(&selected, graph, session, &mut runner).await;
+    let outcome = verify_all(&selected, graph, &state, session, &mut runner).await;
     (runner.into_client(), outcome)
 }
 
@@ -126,6 +137,7 @@ async fn verify_under_lock(
 async fn verify_all(
     selected: &[Uuid],
     graph: &Graph,
+    state: &zapadka_pg::registry::RegistryState,
     session: &mut Session,
     runner: &mut Runner,
 ) -> Result<()> {
@@ -133,10 +145,14 @@ async fn verify_all(
         let Some(migration) = graph.get(*id) else {
             continue;
         };
+        let Some(row) = state.applied.get(id) else {
+            continue;
+        };
 
         match runner.verify(migration).await {
             Ok(Some(verified)) => {
-                let mut result = result_of(migration, Action::Verify, Status::Succeeded);
+                let mut result =
+                    recorded_result_of(migration, Action::Verify, Status::Succeeded, row);
                 result.duration_ms = Some(verified.duration_ms);
                 result.scripts.push(script_of(&verified, Status::Succeeded));
                 session.migrations.push(result);
@@ -144,12 +160,15 @@ async fn verify_all(
             Ok(None) => {
                 // No verify.sql. Reported as skipped rather than passed: a
                 // migration with no verification has not been verified.
-                session
-                    .migrations
-                    .push(result_of(migration, Action::Verify, Status::Skipped));
+                session.migrations.push(recorded_result_of(
+                    migration,
+                    Action::Verify,
+                    Status::Skipped,
+                    row,
+                ));
             }
             Err(error) => {
-                let mut result = result_of(migration, Action::Verify, Status::Failed);
+                let mut result = recorded_result_of(migration, Action::Verify, Status::Failed, row);
                 // The script that failed is named, with its hash. `verify.sql`
                 // is mutable, so "which bytes failed" is not answerable from
                 // the migration id alone.

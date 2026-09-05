@@ -1,4 +1,4 @@
-# Zapadka
+# Zapadka 0.6.0
 
 A PostgreSQL 18 migration and database-testing tool, shipped as static Linux
 binaries, native macOS binaries for Intel and Apple Silicon, and a native
@@ -24,7 +24,17 @@ components from attribution-only references.
 ## What it does
 
 `init`, `new`, `lint`, `status`, `deploy`, `verify`, `revert`, `baseline`,
-`test`.
+`test`, `format`, `rehash`.
+
+- **Structural migration hashes.** New deployments ignore SQL whitespace and
+  ordinary source comments while preserving literals, ordered SQL structure,
+  and quoted function bodies. Existing projects can preview `rehash --dry-run`
+  and convert each target with `rehash` without executing migration SQL.
+  Already-edited legacy migrations require `--accept-current --reason "..."`;
+  original deployment evidence is retained with an audited transition. Update
+  binaries and CI and convert all targets before committing broad formatting.
+  Older binaries refuse the upgraded registry. See the
+  [transition guide](https://github.com/kljensen/zapadka/blob/main/docs/structural-hashing-transition.md).
 
 - Migrations are a dependency graph with UUIDv7 identities and a deterministic
   topological order — two people adding migrations on separate branches do not
@@ -34,8 +44,9 @@ components from attribution-only references.
 - **Runner-owned transactions.** A top-level `COMMIT`, `ROLLBACK`, or
   `SAVEPOINT` in a script is rejected by a PostgreSQL 18 parser compiled into
   the binary, before anything connects.
-- **Deployed history is immutable.** Editing or deleting an applied migration
-  is a hard error, not a warning and not a silent re-run.
+- **Deployed history is immutable.** Substantive edits or deleting an applied
+  migration are hard errors. Legacy byte-hashed migrations require explicit
+  conversion before cosmetic edits are accepted.
 - **Verification is separate from testing.** `verify.sql` runs after its
   migration commits, in a read-only transaction that is always rolled back. A
   failed verification stops the run and leaves the committed migration applied;
@@ -92,6 +103,12 @@ what a superuser's `COPY ... TO PROGRAM` does outside the database — Zapadka
 reports such a role rather than assuming it away.
 
 ## Compatibility promises
+
+Registry format 3 requires Zapadka 0.6.0 or newer. Upgrade every developer and
+CI binary before using a mutating command with this release; old binaries
+refuse the upgraded registry. Untouched registry v1/v2 projects remain readable,
+and applied legacy definitions continue to use `raw-v1` until explicitly
+rehashed. New deployments and baselines use `structural-v1`.
 
 - `error.code` values and process exit codes are stable. Match on those, never
   on message text.

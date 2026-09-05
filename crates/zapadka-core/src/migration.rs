@@ -41,6 +41,14 @@ pub struct Migration {
 }
 
 impl Migration {
+    /// The structural definition used for new deployment records. Discovery
+    /// keeps the legacy byte hash so lint can report malformed SQL normally.
+    pub fn structural_definition_sha256(&self) -> Result<String> {
+        self.manifest
+            .structural_definition_sha256(&self.deploy.sql)
+            .map_err(|error| error.at(Location::file(&self.deploy.relative_path)))
+    }
+
     /// The migrations this one depends on.
     pub fn depends(&self) -> &[Uuid] {
         &self.manifest.depends

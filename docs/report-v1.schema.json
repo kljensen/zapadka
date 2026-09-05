@@ -252,8 +252,26 @@
           "$ref": "#/$defs/TransactionMode"
         },
         "definition_sha256": {
-          "description": "SHA-256 of the immutable deployment definition: the canonical manifest\nplus `deploy.sql`. This is what history integrity is checked against.",
+          "description": "SHA-256 of the deployment definition under `definition_algorithm`:\nthe canonical manifest plus raw SQL bytes or canonical SQL structure.\nThis is what history integrity is checked against.",
           "type": "string"
+        },
+        "definition_algorithm": {
+          "description": "Algorithm associated with this definition. Absent in older reports.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rehash": {
+          "description": "A comparison-policy transition; never implies migration SQL executed.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RehashResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "scripts": {
           "description": "The scripts this action ran, in execution order.",
@@ -295,6 +313,11 @@
     "Action": {
       "description": "The operation a run performed on a migration.",
       "oneOf": [
+        {
+          "description": "Changed the algorithm used to validate an applied definition.",
+          "type": "string",
+          "const": "rehash"
+        },
         {
           "description": "Selected for execution but not executed, as in `--dry-run` and `status`.",
           "type": "string",
@@ -375,6 +398,70 @@
           "type": "string",
           "const": "forbidden"
         }
+      ]
+    },
+    "RehashResult": {
+      "description": "Evidence and proposed identity for one rehash entry.",
+      "type": "object",
+      "properties": {
+        "original_deploy_sha256": {
+          "description": "Exact bytes recorded at deployment, preserved by this transition.",
+          "type": "string"
+        },
+        "current_deploy_sha256": {
+          "description": "Exact source used for the proposed structural identity.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Operator's reason, only for an asserted conversion.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "committed": {
+          "description": "Whether this individual conversion committed successfully.",
+          "type": "boolean"
+        },
+        "disposition": {
+          "description": "verified, accepted, already_current, source_mismatch, or blocked.",
+          "type": "string"
+        },
+        "old_definition_sha256": {
+          "description": "Definition before the transition.",
+          "type": "string"
+        },
+        "old_definition_algorithm": {
+          "description": "Comparison algorithm before the transition.",
+          "type": "string"
+        },
+        "new_definition_sha256": {
+          "description": "Proposed structural definition, when SQL is parseable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "new_definition_algorithm": {
+          "description": "Proposed comparison algorithm.",
+          "type": "string"
+        },
+        "dry_run": {
+          "description": "Whether this report describes a preview rather than a committed change.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "original_deploy_sha256",
+        "committed",
+        "disposition",
+        "old_definition_sha256",
+        "old_definition_algorithm",
+        "new_definition_algorithm",
+        "dry_run"
       ]
     },
     "Script": {

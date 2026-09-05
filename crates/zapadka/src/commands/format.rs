@@ -1,8 +1,8 @@
 //! `zapadka format` — canonicalize SQL without connecting to a database.
 //!
 //! A migration's `deploy.sql` is part of its immutable deployed definition.
-//! Checking it is always safe; rewriting it requires an explicit acknowledgement
-//! so formatting cannot quietly create a history mismatch.
+//! Rewrites must preserve the complete SQL structure. Legacy targets require
+//! explicit rehashing before formatting; this command never connects to them.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -28,26 +28,36 @@ pub fn run(
     // Format every input before touching the filesystem. A syntax error in a
     // later file therefore cannot leave earlier files rewritten.
     let formatted: Vec<_> = paths.iter().map(format_file).collect::<Result<_>>()?;
+    finish_format(&formatted, args, session)
+}
+
+fn finish_format(
+    formatted: &[FormattedFile],
+    args: &FormatArgs,
+    session: &mut Session,
+) -> Result<()> {
     let changed: Vec<_> = formatted
         .iter()
         .filter(|file| file.original != file.formatted)
         .collect();
 
-    if args.write
-        && !args.allow_deploy_rewrite
-        && let Some(deploy) = changed
-            .iter()
-            .find(|file| is_deploy_script(&file.path.absolute))
+    // Complete preflight before any writes, including when the deprecated
+    // --allow-deploy-rewrite compatibility flag is supplied.
+    for file in &changed {
+        ensure_equivalent(file)?;
+    }
+    if changed
+        .iter()
+        .any(|file| is_deploy_script(&file.path.absolute))
     {
-        return Err(Error::new(
-            ErrorCode::FormatDeployRewriteDenied,
-            format!(
-                "refusing to rewrite immutable migration script {}",
-                deploy.path.relative
-            ),
-        )
-        .at(Location::file(&deploy.path.relative))
-        .with_hint("pass --allow-deploy-rewrite only before that migration is deployed"));
+        session.diagnose(Diagnostic {
+            severity: Severity::Note,
+            code: "format.legacy_targets".to_owned(),
+            message: "deploy.sql formatting preserves structural-v1; targets using raw-v1 must be rehashed before accepting these byte changes".to_owned(),
+            migration_id: None,
+            location: None,
+            hint: Some("run zapadka rehash --dry-run and zapadka rehash for each target before formatting; format does not connect to databases".to_owned()),
+        });
     }
 
     if args.check {
@@ -87,6 +97,23 @@ pub fn run(
             location: Some(Location::file(&file.path.relative)),
             hint: None,
         });
+    }
+    Ok(())
+}
+
+fn ensure_equivalent(file: &FormattedFile) -> Result<()> {
+    let canonicalize = |sql: &str| {
+        zapadka_parser::canonicalize(sql).map_err(|error| {
+            Error::new(ErrorCode::ScriptParseError, error.to_string())
+                .at(Location::file(&file.path.relative))
+        })
+    };
+    if canonicalize(&file.original)? != canonicalize(&file.formatted)? {
+        return Err(Error::new(
+            ErrorCode::FormatDeployRewriteDenied,
+            "formatter output changes SQL structure; no files were rewritten",
+        ).at(Location::file(&file.path.relative))
+         .with_hint("report this formatter incompatibility; literal and procedural-body changes are substantive"));
     }
     Ok(())
 }
@@ -224,11 +251,6 @@ fn needs_formatting_diagnostic(path: &str) -> Diagnostic {
 
 fn is_deploy_script(path: &Utf8Path) -> bool {
     path.file_name() == Some("deploy.sql")
-        && path.parent().is_some_and(|parent| {
-            parent
-                .parent()
-                .is_some_and(|grandparent| grandparent.file_name() == Some("migrations"))
-        })
 }
 
 fn atomic_write(path: &Utf8Path, contents: &str) -> Result<()> {
@@ -384,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn write_refuses_changed_deploy_script_until_acknowledged() {
+    fn write_preserves_structural_definition_without_acknowledgement() {
         let project = temp_project();
         let id = write_migration(
             project.path(),
@@ -398,18 +420,17 @@ mod tests {
         let (config, graph) = load_project(project.path()).unwrap();
         let mut session = Session::new("format");
 
-        let error = run(
+        run(
             &config,
             &graph,
             &args(vec![deploy.clone()], false, true, false),
             &mut session,
         )
-        .unwrap_err();
-
-        assert_eq!(error.code, ErrorCode::FormatDeployRewriteDenied);
+        .unwrap();
+        assert_eq!(session.diagnostics[0].code, "format.legacy_targets");
         assert_eq!(
-            fs::read_to_string(&deploy).unwrap(),
-            "create table things(id int);"
+            zapadka_parser::canonicalize(&fs::read_to_string(&deploy).unwrap()).unwrap(),
+            zapadka_parser::canonicalize("create table things(id int);").unwrap()
         );
 
         run(
@@ -423,6 +444,44 @@ mod tests {
             fs::read_to_string(&deploy).unwrap(),
             "create table things(id int);"
         );
+    }
+
+    #[test]
+    fn structural_failure_preflights_every_file_even_with_legacy_override() {
+        let project = temp_project();
+        let mut files = Vec::new();
+        for (name, original, formatted) in [
+            ("first.sql", "select  1;", "SELECT 1"),
+            (
+                "deploy.sql",
+                "DO $$BEGIN NULL; END$$",
+                "DO $$BEGIN  NULL; END$$",
+            ),
+        ] {
+            let absolute = project.path().join(name);
+            fs::write(&absolute, original).unwrap();
+            files.push(FormattedFile {
+                path: SelectedPath {
+                    absolute,
+                    relative: name.to_owned(),
+                },
+                original: original.to_owned(),
+                formatted: formatted.to_owned(),
+            });
+        }
+        let error = finish_format(
+            &files,
+            &args(Vec::new(), false, true, true),
+            &mut Session::new("format"),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::FormatDeployRewriteDenied);
+        for file in files {
+            assert_eq!(
+                fs::read_to_string(file.path.absolute).unwrap(),
+                file.original
+            );
+        }
     }
 
     #[test]

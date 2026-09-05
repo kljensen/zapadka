@@ -5,15 +5,19 @@
 //! DDL for `lint` — must agree with the PostgreSQL version Zapadka supports.
 //! This crate wraps a pinned PostgreSQL 18 `libpg_query` build and translates
 //! its parse tree into the small vocabulary the rest of Zapadka uses. Parse-tree
-//! shapes never escape this crate: callers see [`Statement`] and
-//! [`StatementKind`], never JSON or upstream node types.
+//! interpretation stays in this crate: callers see [`Statement`],
+//! [`StatementKind`], or the opaque stable string returned by [`canonicalize`].
 //!
 //! Zapadka deliberately does not implement its own SQL splitter or use a
 //! permissive multi-dialect parser, because either would let a script escape the
 //! runner's transaction boundary. See ADR-0002.
 
+mod canonical;
 mod classify;
 mod ffi;
+mod tree;
+
+pub use canonical::canonicalize;
 
 pub use classify::{
     AlterTableAction, ConstraintKind, DropObject, QualifiedName, Statement, StatementKind,
@@ -101,7 +105,7 @@ impl Default for FormatOptions {
 /// exist, that types are compatible, or that the script is safe to run under
 /// production load — PostgreSQL execution remains authoritative.
 pub fn parse(sql: &str) -> Result<ParsedScript, ParseError> {
-    let tree = ffi::parse_to_json(sql)?;
+    let tree = tree::parse(sql)?;
     Ok(classify::classify(&tree, sql))
 }
 

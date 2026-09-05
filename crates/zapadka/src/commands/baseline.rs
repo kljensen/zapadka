@@ -108,7 +108,7 @@ async fn baseline_under_lock(
     // Read again now the lock is held. Otherwise a concurrent revert could make
     // a migration pending between the read and the decision, and this run would
     // compute an empty closure and report success while recording nothing.
-    let state = match target::refresh_state(&client, config, schema).await {
+    let state = match target::refresh_state(&mut client, config, schema).await {
         Ok(state) => state,
         Err(error) => return (client, Err(error)),
     };
@@ -152,6 +152,14 @@ async fn baseline_under_lock(
         return (client, Ok(()));
     }
 
+    let reports = match pending
+        .iter()
+        .map(|migration| result_of(migration, Action::Baseline, Status::Succeeded))
+        .collect::<Result<Vec<_>>>()
+    {
+        Ok(reports) => reports,
+        Err(error) => return (client, Err(error)),
+    };
     let mut runner = Runner::new(
         client,
         schema.to_owned(),
@@ -164,11 +172,7 @@ async fn baseline_under_lock(
 
     let result = runner.baseline(&pending).await;
     if result.is_ok() {
-        for migration in pending {
-            session
-                .migrations
-                .push(result_of(migration, Action::Baseline, Status::Succeeded));
-        }
+        session.migrations.extend(reports);
     }
     (runner.into_client(), result)
 }

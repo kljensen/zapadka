@@ -49,5 +49,7 @@ exec docker run --rm --platform "$PLATFORM" \
   sh -euc "
     apk add --no-cache musl-dev build-base >/dev/null
     cargo build --release --locked --target '$TARGET' -p zapadka
+    cargo test --release --locked --target '$TARGET' -p zapadka-parser canonical::tests
+    cargo test --release --locked --target '$TARGET' -p zapadka-core structural_hash
     chown -R '$HOST_UID:$HOST_GID' /src/target
   "

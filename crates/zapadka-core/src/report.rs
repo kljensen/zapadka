@@ -144,9 +144,16 @@ pub struct MigrationResult {
     pub status: Status,
     /// The execution mode the manifest declared.
     pub transaction: TransactionMode,
-    /// SHA-256 of the immutable deployment definition: the canonical manifest
-    /// plus `deploy.sql`. This is what history integrity is checked against.
+    /// SHA-256 of the deployment definition under `definition_algorithm`:
+    /// the canonical manifest plus raw SQL bytes or canonical SQL structure.
+    /// This is what history integrity is checked against.
     pub definition_sha256: String,
+    /// Algorithm associated with this definition. Absent in older reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_algorithm: Option<String>,
+    /// A comparison-policy transition; never implies migration SQL executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rehash: Option<RehashResult>,
     /// The scripts this action ran, in execution order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scripts: Vec<Script>,
@@ -162,6 +169,8 @@ pub struct MigrationResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
+    /// Changed the algorithm used to validate an applied definition.
+    Rehash,
     /// Selected for execution but not executed, as in `--dry-run` and `status`.
     Plan,
     /// Applied the migration's `deploy.sql`.
@@ -175,6 +184,34 @@ pub enum Action {
     /// Recorded an operator's account of an interrupted nontransactional
     /// statement, rather than something Zapadka observed.
     Resolve,
+}
+
+/// Evidence and proposed identity for one rehash entry.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RehashResult {
+    /// Exact bytes recorded at deployment, preserved by this transition.
+    pub original_deploy_sha256: String,
+    /// Exact source used for the proposed structural identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_deploy_sha256: Option<String>,
+    /// Operator's reason, only for an asserted conversion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Whether this individual conversion committed successfully.
+    pub committed: bool,
+    /// verified, accepted, already_current, source_mismatch, or blocked.
+    pub disposition: String,
+    /// Definition before the transition.
+    pub old_definition_sha256: String,
+    /// Comparison algorithm before the transition.
+    pub old_definition_algorithm: String,
+    /// Proposed structural definition, when SQL is parseable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_definition_sha256: Option<String>,
+    /// Proposed comparison algorithm.
+    pub new_definition_algorithm: String,
+    /// Whether this report describes a preview rather than a committed change.
+    pub dry_run: bool,
 }
 
 /// The outcome of one migration's action.

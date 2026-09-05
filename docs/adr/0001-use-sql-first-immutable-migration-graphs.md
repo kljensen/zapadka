@@ -18,7 +18,11 @@ Each migration will be a directory with a typed `migration.toml`, `deploy.sql`,
 and optional `revert.sql` and `verify.sql`. A UUIDv7 is its permanent identity;
 declared dependencies form a DAG executed in deterministic topological order.
 The canonical manifest and `deploy.sql` form the immutable deployment
-definition and are SHA-256 hashed. Changes to deployed definitions are errors.
+definition and are SHA-256 hashed with an explicitly recorded algorithm.
+Structural definitions ignore source comments and source positions while
+preserving the complete SQL tree; legacy definitions retain exact-byte checks
+until an explicit audited rehash (ADR-0006). Substantive changes to deployed
+definitions are errors.
 Mutable verification and revert artifacts are hashed when executed.
 
 ## Consequences

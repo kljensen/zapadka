@@ -26,7 +26,7 @@ zapadka status --target production
 ```
 
 The whole command set is `init`, `new`, `lint`, `format`, `status`, `deploy`,
-`verify`, `revert`, `baseline`, and `test`.
+`verify`, `revert`, `baseline`, `resolve`, `rehash`, and `test`.
 
 ## The basic idea
 
@@ -51,9 +51,9 @@ That only promises what PostgreSQL promises. For example, `nextval()` is not
 transactional, so a failed migration can leave a sequence advanced even though
 the migration was not recorded as applied.
 
-Already-deployed migrations are immutable. Editing one is a hard error, not a
-warning and definitely not an invitation to silently run it again. Make a new
-migration for a correction; then the history says what actually happened.
+Already-deployed definitions are immutable. Substantive SQL or execution-manifest
+edits are history errors; make a new migration for a correction. Structural
+hashing permits cosmetic edits after a target adopts that comparison policy.
 
 ## Formatting, verification, and tests
 
@@ -61,10 +61,20 @@ migration for a correction; then the history says what actually happened.
 just the paths you give it) with a PostgreSQL-aware parser. Its format command
 is in the tradition of [pgFormatter](https://github.com/darold/pgFormatter),
 including regression fixtures from that project's corpus. `--write` rewrites
-selected files atomically. It refuses to rewrite a `deploy.sql` unless you
-explicitly add `--allow-deploy-rewrite`, because formatting a deployed migration
-changes its definition. Comments survive formatting; code inside a dollar-quoted
-function body is left alone.
+selected files atomically after every output passes a structural-equivalence
+check. `deploy.sql` needs no override; the deprecated `--allow-deploy-rewrite`
+flag remains accepted but cannot bypass that check. Comments survive formatting;
+code inside a dollar-quoted function body is left alone.
+
+New deployments use `structural-v1` hashes, so SQL whitespace and ordinary source
+comments do not change the definition. Literal contents, `COMMENT ON` payloads,
+and text inside function bodies remain significant. Existing `raw-v1` targets
+still check exact bytes: update binaries and CI to 0.6.0 or newer, then run `zapadka rehash
+--dry-run` and `zapadka rehash` **for each target before committing formatting
+changes**. Already-edited projects can explicitly accept current SQL. Formatting
+never connects to databases or converts their registries. See the
+[transition guide](docs/structural-hashing-transition.md) for previews, acceptance,
+and rollout across environments.
 
 Each migration can have a `verify.sql`. Zapadka runs it after the migration has
 committed, on a fresh read-only transaction that it always rolls back. This is

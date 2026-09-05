@@ -3,10 +3,11 @@
 //! # What is immutable
 //!
 //! A migration's *deployment definition* is the pair (canonical manifest,
-//! `deploy.sql`). Once a migration is applied, that pair is frozen: changing it
-//! means the database no longer matches the source that produced it, which
-//! Zapadka reports as a history error rather than silently re-running or
-//! ignoring. Corrective work is a new migration.
+//! `deploy.sql`) interpreted under its recorded algorithm. Legacy `raw-v1`
+//! binds exact bytes. `structural-v1` binds the full SQL tree while ignoring
+//! source comments and positions. Substantive changes are history errors;
+//! corrective work is a new migration. Explicit rehash transitions preserve
+//! the original execution evidence (ADR-0006).
 //!
 //! The definition covers only what determines *how `deploy.sql` executes*: the
 //! migration's identity, its dependency edges, and its transaction mode.
@@ -32,6 +33,11 @@ pub const MANIFEST_FILE_NAME: &str = "migration.toml";
 
 /// The `format_version` this binary writes and understands.
 pub const MANIFEST_FORMAT_VERSION: u32 = 1;
+
+/// Original exact-byte deployment definition algorithm.
+pub const LEGACY_DEFINITION_ALGORITHM: &str = "raw-v1";
+/// Full PostgreSQL parse-tree deployment definition algorithm (ADR-0006).
+pub const STRUCTURAL_DEFINITION_ALGORITHM: &str = "structural-v1";
 
 /// The prefix of the canonical manifest, which also versions the hashing
 /// algorithm. Changing how definitions are canonicalized requires changing this
@@ -283,6 +289,21 @@ impl Manifest {
         hex(&hasher.finalize())
     }
 
+    /// Hashes the execution manifest and complete canonical SQL structure.
+    /// Source comments and positions do not contribute; quoted contents do.
+    pub fn structural_definition_sha256(&self, deploy_sql: &str) -> Result<String> {
+        let canonical = zapadka_parser::canonicalize(deploy_sql)
+            .map_err(|error| Error::new(ErrorCode::ScriptParseError, error.to_string()))?;
+        let envelope = format!(
+            "zapadka.migration.v2\nalgorithm={STRUCTURAL_DEFINITION_ALGORITHM}\nid={}\ntransaction={}\ndepends={}\ndeploy_structure_sha256={}\n",
+            self.id,
+            self.transaction,
+            self.canonical_depends().join(","),
+            sha256_hex(canonical.as_bytes()),
+        );
+        Ok(sha256_hex(envelope.as_bytes()))
+    }
+
     /// Renders the `migration.toml` that `zapadka new` writes.
     pub fn scaffold(id: Uuid, depends: &[Uuid], reversibility: Reversibility) -> String {
         let mut depends_list: Vec<String> = depends.iter().map(|id| format!("\"{id}\"")).collect();
@@ -369,6 +390,90 @@ mod tests {
             "format_version = 1\nid = \"{A}\"\ndepends = [{depends}]\n"
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn structural_hash_compatibility_and_manifest_contract() {
+        let original = manifest("");
+        let hash = original.structural_definition_sha256("SELECT 1").unwrap();
+        assert_eq!(
+            hash,
+            "52fae8d8678ef034bb17c578bf9e47c9b4d72bd5089d3973a0fddd4ef78c9602"
+        );
+        assert_eq!(
+            hash,
+            original
+                .structural_definition_sha256("-- comment\r\n select 1 ;")
+                .unwrap()
+        );
+        assert_ne!(hash, original.definition_sha256(b"SELECT 1"));
+        assert_ne!(
+            hash,
+            original.structural_definition_sha256("SELECT 2").unwrap()
+        );
+        assert_ne!(
+            hash,
+            manifest(&format!("\"{B}\""))
+                .structural_definition_sha256("SELECT 1")
+                .unwrap()
+        );
+        let mut changed = original.clone();
+        changed.transaction = Transaction::Forbidden;
+        assert_ne!(
+            hash,
+            changed.structural_definition_sha256("SELECT 1").unwrap()
+        );
+        changed = original.clone();
+        changed.id = Uuid::parse_str(B).unwrap();
+        assert_ne!(
+            hash,
+            changed.structural_definition_sha256("SELECT 1").unwrap()
+        );
+        assert_eq!(
+            manifest(&format!("\"{B}\",\"{C}\""))
+                .structural_definition_sha256("SELECT 1")
+                .unwrap(),
+            manifest(&format!("\"{C}\",\"{B}\""))
+                .structural_definition_sha256("SELECT 1")
+                .unwrap(),
+        );
+        assert!(original.structural_definition_sha256("SELECT (").is_err());
+    }
+
+    #[test]
+    fn structural_hash_golden_corpus() {
+        let manifest = manifest("");
+        let corpus = [
+            "CREATE TABLE t (id bigint PRIMARY KEY, name text DEFAULT 'é' NOT NULL, CHECK (id > 0))",
+            "ALTER TABLE t ADD COLUMN n integer DEFAULT 42, ADD CONSTRAINT positive CHECK (n >= 0)",
+            "CREATE UNIQUE INDEX ix ON t (name DESC, id) WHERE id > 3",
+            "CREATE FUNCTION f(a integer) RETURNS integer LANGUAGE sql AS $$SELECT a + 1$$",
+            "DO $$BEGIN /* inner comment */ RAISE NOTICE 'é'; END$$",
+            "COMMENT ON TABLE t IS 'persistent comment'",
+            "INSERT INTO t(id, name) VALUES (1, 'é'), (2, E'a\\nb') ON CONFLICT (id) DO UPDATE SET name = 'changed'",
+            "SELECT CASE WHEN x IN (1, 2) THEN ARRAY[1, 2] ELSE ARRAY[3, 4] END FROM t WHERE x > 0 ORDER BY x LIMIT 3 OFFSET 2",
+            "SELECT json_object('a': 1), json_array(1, 2)",
+            "CREATE TABLESPACE t LOCATION '/var/data'",
+        ];
+        let actual: Vec<_> = corpus
+            .iter()
+            .map(|sql| manifest.structural_definition_sha256(sql).unwrap())
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                "3245d05bcfea1e5f887de094bdd5de74ad7123bee343007771492bd01edb0db6",
+                "0739ca5012058754a63923fd2fc90ddab52d68cad89d53f4bbd187d5539dacf2",
+                "53ad494600388883321620d7239ab3868fbad38ee57a380783946fa64dd113ce",
+                "52a3d814357f86a41e601b862de357ce81e52558ddfcaed24884f4f832b5f86d",
+                "c4e273fbd6ccfea7a4c5f37b413a31dc2eda77c7277020d1ae837dc22899eda2",
+                "32532004ff93c4bb0aaa2f1c308ca37f80268ed95c987eb6f0a422f7e6ce80c1",
+                "bbb58004539861eeff6bf4bf6ff1b27f03cf18015baef7e5dbd0d8130ed2d83c",
+                "2b9f9b64662dd0dfc154723144bc3620f766540aed162bea366ad124f48065ec",
+                "29f58d0791753eff995acb5ff1d8a5974254eb4a55662f029fef6863355e27fd",
+                "911c22bc44b188ae92cbb1c78091571206cba864d956313acba9bbf9f72f1f2d",
+            ]
+        );
     }
 
     #[test]
