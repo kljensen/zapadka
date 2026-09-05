@@ -84,10 +84,19 @@ jobs:
       # locked dependency graph, so it describes what was actually compiled.
       - name: Generate an SBOM
         run: |
-          cargo install cargo-cyclonedx --locked
-          cargo cyclonedx --format json --spec-version 1.5 --target ${{ matrix.target }}
-          sbom="$(find . -name 'zapadka*.cdx.json' -not -path './target/*' | head -1)"
-          test -n "$sbom" || { echo "::error::no SBOM was produced"; exit 1; }
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx --manifest-path crates/zapadka/Cargo.toml --describe binaries --format json --spec-version 1.5 --target ${{ matrix.target }}
+          # The generator emits one file per binary, including workspace tools.
+          # Select the application explicitly; a prefix search can select a library.
+          sbom=crates/zapadka/zapadka_bin.cdx.json
+          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "zapadka") | .version')"
+          jq -e --arg version "$version" '
+            .bomFormat == "CycloneDX" and .specVersion == "1.5" and
+            .metadata.component.name == "zapadka" and
+            .metadata.component.type == "application" and
+            .metadata.component.version == $version and
+            ([.components[].name] | contains(["zapadka-core", "zapadka-parser", "zapadka-pg"]))
+          ' "$sbom" >/dev/null || { echo "::error::SBOM does not describe the zapadka executable and version"; exit 1; }
           mv "$sbom" "target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}.cdx.json"
 
       # Vendored sources do not appear in Cargo's dependency graph. Some are
@@ -189,10 +198,19 @@ jobs:
 
       - name: Generate an SBOM
         run: |
-          cargo install cargo-cyclonedx --locked
-          cargo cyclonedx --format json --spec-version 1.5 --target "${{ matrix.target }}"
-          sbom="$(find . -name 'zapadka*.cdx.json' -not -path './target/*' | head -1)"
-          test -n "$sbom" || { echo "::error::no SBOM was produced"; exit 1; }
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx --manifest-path crates/zapadka/Cargo.toml --describe binaries --format json --spec-version 1.5 --target "${{ matrix.target }}"
+          # The generator emits one file per binary, including workspace tools.
+          # Select the application explicitly; a prefix search can select a library.
+          sbom=crates/zapadka/zapadka_bin.cdx.json
+          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "zapadka") | .version')"
+          jq -e --arg version "$version" '
+            .bomFormat == "CycloneDX" and .specVersion == "1.5" and
+            .metadata.component.name == "zapadka" and
+            .metadata.component.type == "application" and
+            .metadata.component.version == $version and
+            ([.components[].name] | contains(["zapadka-core", "zapadka-parser", "zapadka-pg"]))
+          ' "$sbom" >/dev/null || { echo "::error::SBOM does not describe the zapadka executable and version"; exit 1; }
           mv "$sbom" "target/${{ matrix.target }}/release/zapadka-${{ matrix.target }}.cdx.json"
 
       - name: Record vendored source provenance
@@ -272,10 +290,19 @@ jobs:
 
       - name: Generate an SBOM
         run: |
-          cargo install cargo-cyclonedx --locked
-          cargo cyclonedx --format json --spec-version 1.5 --target x86_64-pc-windows-msvc
-          sbom="$(find . -name 'zapadka*.cdx.json' -not -path './target/*' | head -1)"
-          test -n "$sbom" || { echo "::error::no SBOM was produced"; exit 1; }
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx --manifest-path crates/zapadka/Cargo.toml --describe binaries --format json --spec-version 1.5 --target x86_64-pc-windows-msvc
+          # The generator emits one file per binary, including workspace tools.
+          # Select the application explicitly; a prefix search can select a library.
+          sbom=crates/zapadka/zapadka_bin.cdx.json
+          version="$(cargo metadata --locked --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "zapadka") | .version')"
+          jq -e --arg version "$version" '
+            .bomFormat == "CycloneDX" and .specVersion == "1.5" and
+            .metadata.component.name == "zapadka" and
+            .metadata.component.type == "application" and
+            .metadata.component.version == $version and
+            ([.components[].name] | contains(["zapadka-core", "zapadka-parser", "zapadka-pg"]))
+          ' "$sbom" >/dev/null || { echo "::error::SBOM does not describe the zapadka executable and version"; exit 1; }
           mv "$sbom" target/x86_64-pc-windows-msvc/release/zapadka-x86_64-pc-windows-msvc.cdx.json
 
       - name: Record vendored source provenance
